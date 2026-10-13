@@ -68,9 +68,13 @@ import traceback
 # User settings
 # ---------------------------------------------------------------------------
 
-# Where to write the dump. None = "<seed folder>/<seed name>_standards_dump".
-# The environment variable STANDARDS_DUMP_DIR overrides this as well.
-OUTPUT_DIR: str | None = None
+# Where to write the dump. Each run creates a "<seed name>_<timestamp>"
+# subfolder here. Set to None to write next to the seed file instead.
+# The environment variable STANDARDS_DUMP_DIR overrides this.
+OUTPUT_DIR: str | None = (
+    r"C:\Users\u12770\OneDrive - Metropolitan Water District of So Cal"
+    r"\Documents\Standards_Dump"
+)
 
 # Open each DGN library and dump its standards (levels, styles, cells, ...).
 DUMP_DGNLIBS = True
@@ -1668,30 +1672,33 @@ def dump_library(path: str, full: bool, is_cell_library: bool = False) -> dict:
 # ---------------------------------------------------------------------------
 
 def choose_output_dir(dgn_path: str | None) -> str:
-    candidates = []
-    if os.environ.get("STANDARDS_DUMP_DIR"):
-        candidates.append(os.environ["STANDARDS_DUMP_DIR"])
-    if OUTPUT_DIR:
-        candidates.append(OUTPUT_DIR)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     base = os.path.splitext(os.path.basename(dgn_path or "untitled"))[0]
+    # (root folder, run subfolder) in order of preference
+    candidates = []
+    if os.environ.get("STANDARDS_DUMP_DIR"):
+        candidates.append((os.environ["STANDARDS_DUMP_DIR"], f"{base}_{stamp}"))
+    if OUTPUT_DIR:
+        candidates.append((OUTPUT_DIR, f"{base}_{stamp}"))
     if dgn_path:
-        candidates.append(os.path.join(os.path.dirname(dgn_path), f"{base}_standards_dump"))
-    for v in ("MS_TMP",):
-        p = cfg_get(v)
-        if p:
-            candidates.append(os.path.join(p, f"{base}_standards_dump"))
-    candidates.append(os.path.join(tempfile.gettempdir(), f"{base}_standards_dump"))
-    for c in candidates:
-        out = os.path.join(c, stamp)
+        candidates.append((os.path.join(os.path.dirname(dgn_path), f"{base}_standards_dump"), stamp))
+    p = cfg_get("MS_TMP")
+    if p:
+        candidates.append((os.path.join(p, f"{base}_standards_dump"), stamp))
+    candidates.append((os.path.join(tempfile.gettempdir(), f"{base}_standards_dump"), stamp))
+    for i, (root, sub) in enumerate(candidates):
+        out = os.path.join(root, sub)
         try:
             os.makedirs(out, exist_ok=True)
             test = os.path.join(out, ".write_test")
             with open(test, "w") as fh:
                 fh.write("ok")
             os.remove(test)
+            if i > 0:
+                NOTES.append(f"Preferred output folder not writable; wrote to {out}")
             return out
-        except Exception:
+        except Exception as e:  # noqa: BLE001
+            log(f"WARNING cannot write to {out}: {e}")
             continue
     raise RuntimeError("No writable output directory found")
 

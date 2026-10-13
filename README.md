@@ -12,13 +12,14 @@ tools, such as a Claude Code project, can read.
    and cell libraries come from the session that is currently active.
 2. Open **Utilities > Python Manager**, add `dump_standards.py`, and run it.
 3. Progress is printed to the Python console. When the dump finishes, the
-   Message Center shows the output folder.
+   Message Center shows the output folder, which by default is
+   `...\Documents\Standards_Dump\<seed name>_<timestamp>\`.
 
 Settings are at the top of the script:
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `OUTPUT_DIR` | `None` | Output root. When `None`, the script uses `<seed folder>/<seed>_standards_dump/<timestamp>/`, falling back to `MS_TMP` and then the system temp folder. The `STANDARDS_DUMP_DIR` environment variable also overrides it. |
+| `OUTPUT_DIR` | `C:\Users\u12770\OneDrive - Metropolitan Water District of So Cal\Documents\Standards_Dump` | Output root. Each run writes to a `<seed name>_<timestamp>` subfolder. If the folder can't be written, the script falls back to `<seed folder>\<seed>_standards_dump\<timestamp>\`, then `MS_TMP`, then the system temp folder. Set it to `None` to write next to the seed. The `STANDARDS_DUMP_DIR` environment variable overrides it. |
 | `DUMP_DGNLIBS` | `True` | Open each DGN library in every `*DGNLIBLIST*` variable read-only and dump its standards. |
 | `DUMP_CELL_LIBRARIES` | `True` | Open each cell library from `MS_CELLLIST`, `MS_CELL` and `MS_CELLOUT` and list its cells. |
 | `DUMP_ACTIVE_MODEL_USAGE` | `True` | Count elements in the active model by level, color, line style, weight, type and cell. |
