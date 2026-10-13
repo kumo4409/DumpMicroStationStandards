@@ -24,7 +24,9 @@ Settings are at the top of the script:
 | `DUMP_CELL_LIBRARIES` | `True` | Open each cell library from `MS_CELLLIST`, `MS_CELL` and `MS_CELLOUT` and list its cells. |
 | `DUMP_ACTIVE_MODEL_USAGE` | `True` | Count elements in the active model by level, color, line style, weight, type and cell. |
 | `SCAN_CFG_FILES` | `True` | Parse the WorkSpace `.cfg` files to discover configuration variable names. |
-| `DEEP_INTROSPECTION` | `True` | Call every zero-argument `Get*`, `Is*` and `Has*` method on each object. The results go in the `all` keys. |
+| `DEEP_INTROSPECTION` | `False` | Call every zero-argument `Get*`, `Is*` and `Has*` method on each object, with the results in the `all` keys. This calls native methods blindly and can crash MicroStation, so it is off by default. |
+| `USE_NATIVE_VARIABLE_ITERATION` | `False` | Enumerate configuration variables through a native callback. Off by default because it is a crash risk; the `.cfg` scan finds the names without it. |
+| `SKIP_SECTIONS` | empty | Section names to skip, for example `{"active_model_usage"}`. |
 
 ## Output files
 
@@ -89,6 +91,20 @@ _errors                     [{where, error, traceback}]
 `null` means that value was not available from the API. Each `all` key holds
 the raw result of introspecting the object, so properties the explicit fields
 miss are still captured.
+
+## If MicroStation crashes
+
+The output folder is created before any data is read, and two files are
+written there while the script runs:
+
+* `progress.log` lists each section and library file as it starts, so its
+  last line shows where the script was when MicroStation died.
+* `crash.log` holds the Python traceback written by `faulthandler` at the
+  moment of a native crash, including the line of `dump_standards.py` that
+  made the failing call. It is deleted after a clean run.
+
+Add the failing section to `SKIP_SECTIONS` to get a dump without it, and
+send `crash.log` along when reporting the problem.
 
 ## Robustness
 

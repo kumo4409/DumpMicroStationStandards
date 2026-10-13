@@ -51,6 +51,7 @@ from __future__ import annotations
 import csv
 import datetime as _dt
 import enum
+import faulthandler
 import fnmatch
 import getpass
 import glob
@@ -85,8 +86,17 @@ DUMP_CELL_LIBRARIES = True
 DUMP_ACTIVE_MODEL_USAGE = True
 # Scan workspace .cfg files to discover every configuration variable name.
 SCAN_CFG_FILES = True
-# Call every zero-argument Get*/Is*/Has* method on objects (recommended).
-DEEP_INTROSPECTION = True
+# Call every zero-argument Get*/Is*/Has* method on objects. This captures
+# more properties but calls native methods blindly; some of them can crash
+# MicroStation. Leave off unless you need the extra "all" detail.
+DEEP_INTROSPECTION = False
+# Enumerate config variables through a native callback. Off by default:
+# Python callbacks from native code are a crash risk. The .cfg scan finds
+# the variable names without it.
+USE_NATIVE_VARIABLE_ITERATION = False
+# Sections to skip, e.g. {"active_model_usage", "dictionary"}. If a run
+# crashes, crash.log / progress.log name the section; add it here.
+SKIP_SECTIONS: set[str] = set()
 
 MAX_LIBRARY_FILES = 400        # cap for dgnlibs + cell libraries opened
 MAX_USAGE_ELEMENTS = 500_000   # cap for active-model usage scan
@@ -129,8 +139,57 @@ NOTES: list[str] = []
 _T0 = time.time()
 
 
+_PROGRESS_FH = None   # progress.log - survives a MicroStation crash
+_CRASH_FH = None      # crash.log - faulthandler writes native crash tracebacks
+
+
+def crumb(msg: str) -> None:
+    """Write a breadcrumb to progress.log only (flushed to the OS)."""
+    if _PROGRESS_FH is not None:
+        try:
+            _PROGRESS_FH.write(f"{time.time() - _T0:8.2f}s {msg}\n")
+            _PROGRESS_FH.flush()
+        except Exception:
+            pass
+
+
 def log(msg: str) -> None:
     print(f"[dump_standards {time.time() - _T0:7.1f}s] {msg}", flush=True)
+    crumb(msg)
+
+
+def start_crash_diagnostics(out_dir: str) -> None:
+    global _PROGRESS_FH, _CRASH_FH
+    try:
+        _PROGRESS_FH = open(os.path.join(out_dir, "progress.log"), "w", encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        print("could not create progress.log:", e)
+    try:
+        _CRASH_FH = open(os.path.join(out_dir, "crash.log"), "w", encoding="utf-8")
+        faulthandler.enable(file=_CRASH_FH, all_threads=True)
+    except Exception as e:  # noqa: BLE001
+        print("could not enable faulthandler:", e)
+
+
+def stop_crash_diagnostics(out_dir: str) -> None:
+    global _PROGRESS_FH, _CRASH_FH
+    try:
+        faulthandler.disable()
+    except Exception:
+        pass
+    for fh in (_CRASH_FH, _PROGRESS_FH):
+        try:
+            if fh is not None:
+                fh.close()
+        except Exception:
+            pass
+    _PROGRESS_FH = _CRASH_FH = None
+    try:
+        cp = os.path.join(out_dir, "crash.log")
+        if os.path.exists(cp) and os.path.getsize(cp) == 0:
+            os.remove(cp)
+    except Exception:
+        pass
 
 
 def record_error(where: str, exc: BaseException | str) -> None:
@@ -145,6 +204,9 @@ def record_error(where: str, exc: BaseException | str) -> None:
 
 def section(name: str, fn, *args, default=None, **kwargs):
     """Run one collector; never raise."""
+    if name in SKIP_SECTIONS:
+        log(f"skipping {name} (SKIP_SECTIONS)")
+        return default if default is not None else {"_skipped": True}
     log(f"collecting {name} ...")
     try:
         return fn(*args, **kwargs)
@@ -251,6 +313,29 @@ def s(v) -> str | None:
 def iterate(obj, limit: int | None = None):
     """Iterate any binding collection safely."""
     if obj is None:
+        return
+    t = type(obj)
+    if getattr(t, "__iter__", None) is None:
+        # Python would otherwise call __getitem__(0, 1, 2, ...) until
+        # IndexError; native containers may not bounds-check, so only index
+        # up to an explicit length.
+        n = None
+        for ln in ("__len__", "size", "GetCount", "GetSize", "Count"):
+            f = getattr(obj, ln, None)
+            if f is None:
+                continue
+            try:
+                n = int(f())
+                break
+            except Exception:
+                continue
+        if n is None or getattr(t, "__getitem__", None) is None:
+            return
+        for i in range(min(n, limit) if limit is not None else n):
+            try:
+                yield obj[i]
+            except Exception:
+                return
         return
     try:
         it = iter(obj)
@@ -572,7 +657,8 @@ def discover_cfg_var_names() -> tuple[set[str], list[str], str]:
     # 1) Native enumeration (if the bindings expose it)
     CM = api("ConfigurationManager")
     Delegate = api("IVariableIterationDelegate")
-    if CM is not None and Delegate is not None and hasattr(CM, "IterateThroughVariables"):
+    if (USE_NATIVE_VARIABLE_ITERATION and CM is not None and Delegate is not None
+            and hasattr(CM, "IterateThroughVariables")):
         try:
             class _Collector(Delegate):  # type: ignore[misc, valid-type]
                 def __init__(self):
@@ -1226,6 +1312,7 @@ def collect_levels(dgn_file, colors=None) -> dict:
     ls_cache: dict = {}
     levels = []
     for lh in iterate(cache):
+        crumb(f"  level {s(call(lh, 'GetName'))}")
         try:
             levels.append(level_record(lh, dgn_file, colors, ls_cache))
         except Exception as e:  # noqa: BLE001
@@ -1494,19 +1581,15 @@ def collect_gcs(model) -> dict | None:
 
 
 def collect_active_settings() -> dict:
+    # Only static getters via introspection. ActiveParams.GetValue is not
+    # called: it writes into a caller-typed buffer and is unsafe to probe.
     out = {}
-    for cls in ("Settings", "ActiveParams", "ActiveSettings"):
+    for cls in ("Settings", "ActiveSettings"):
         C = api(cls)
         if C is not None:
             out[cls] = introspect(C, 0)
-    AP, APE = api("ActiveParams"), api("ActiveParam")
-    if AP is not None and APE is not None:
-        vals = {}
-        for n, m in enum_members(APE).items():
-            v = call(AP, "GetValue", args=(m,))
-            if v is not None:
-                vals[n] = to_plain(v, 1)
-        out["ActiveParams.values"] = vals
+    if not out:
+        NOTES.append("Active settings need DEEP_INTROSPECTION = True")
     return out
 
 
@@ -1654,6 +1737,7 @@ def dump_library(path: str, full: bool, is_cell_library: bool = False) -> dict:
         rec["modified"] = _dt.datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds")
     except Exception:
         pass
+    crumb(f"  opening {path}")
     try:
         f = open_dgn_readonly(path)
     except Exception as e:  # noqa: BLE001
@@ -1840,6 +1924,18 @@ def main() -> dict | None:
     if dgn_file is None:
         print("No active DGN file - open the seed file first.")
         return None
+    # Pick the output folder first so progress.log / crash.log exist from
+    # the start: if MicroStation crashes they show where it happened.
+    out_dir = choose_output_dir(file_name(dgn_file))
+    start_crash_diagnostics(out_dir)
+    try:
+        return _run(dgn_file, out_dir)
+    finally:
+        stop_crash_diagnostics(out_dir)
+
+
+def _run(dgn_file, out_dir: str) -> dict:
+    log(f"output folder: {out_dir}")
     model_ref = active_model_ref()
     model = active_model()
 
@@ -1926,7 +2022,6 @@ def main() -> dict | None:
     result["_errors"] = ERRORS
     result["_elapsed_seconds"] = round(time.time() - _T0, 1)
 
-    out_dir = choose_output_dir(file_name(dgn_file))
     files = write_outputs(result, out_dir)
     notify(f"Standards dump complete ({len(ERRORS)} warnings): {out_dir}")
     for f in files:
