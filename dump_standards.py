@@ -97,6 +97,9 @@ USE_NATIVE_VARIABLE_ITERATION = False
 # Sections to skip, e.g. {"active_model_usage", "dictionary"}. If a run
 # crashes, crash.log / progress.log name the section; add it here.
 SKIP_SECTIONS: set[str] = set()
+# Read text/dimension style properties (height, font, arrow size, ...) by
+# trying each property id with the style's typed getters.
+PROBE_STYLE_PROPERTIES = True
 
 MAX_LIBRARY_FILES = 400        # cap for dgnlibs + cell libraries opened
 MAX_USAGE_ELEMENTS = 500_000   # cap for active-model usage scan
@@ -868,12 +871,18 @@ def open_dgn_readonly(path: str):
     return f
 
 
-def model_index_items(dgn_file) -> list:
+def model_index_items(dgn_file):
+    """Yield model index entries. A generator, so the native index (and its
+    iterator) stay alive while the caller reads each entry."""
     idx = call(dgn_file, "GetModelIndex")
-    items = list(iterate(idx)) if idx is not None else []
-    if not items:
-        items = list(iterate(call(dgn_file, "GetModelItemsList", "GetModelIndexCollection")))
-    return items
+    produced = False
+    for item in iterate(idx):
+        produced = True
+        yield item
+    if not produced:
+        coll = call(dgn_file, "GetModelItemsList", "GetModelIndexCollection")
+        for item in iterate(coll):
+            yield item
 
 
 def load_model(dgn_file, model_id):
@@ -1121,14 +1130,20 @@ def collect_models(dgn_file, load_each: bool) -> list[dict]:
             "all": introspect(item, 1),
         }
         rec["is_cell"] = _is_cell_model(rec)
-        if load_each and rec["id"] is not None:
+        out.append(rec)
+    # Load models only after the index iteration has finished: loading can
+    # change the index and invalidate a live iterator.
+    if load_each:
+        for rec in out:
+            if rec["id"] is None:
+                continue
+            crumb(f"  loading model {rec['name']}")
             m = load_model(dgn_file, rec["id"])
             if m is not None:
                 try:
                     rec["model_info"] = model_info_record(m)
                 except Exception as e:  # noqa: BLE001
                     rec["model_info"] = {"_error": str(e)}
-        out.append(rec)
     return out
 
 
@@ -1346,91 +1361,135 @@ def collect_levels(dgn_file, colors=None) -> dict:
 
 # --- styles -----------------------------------------------------------------
 
-def _collection(dgn_file, class_names, static_getters):
-    """Find an iterable of style objects for a file using several spellings."""
+def _visit_collection(dgn_file, class_names, static_getters, visit):
+    """Find a file's collection of styles/libraries and run visit(entry) on
+    each entry *during* iteration.
+
+    Entries handed out by a native collection may point into it, so they
+    must not be kept after the collection or its iterator goes away. (Doing
+    so crashed MicroStation with a pure-virtual-call abort.) Only plain
+    Python data returned by visit() leaves this function.
+    """
+    def run(coll, src):
+        results = []
+        for entry in iterate(coll):
+            try:
+                results.append(visit(unwrap(entry)))
+            except Exception as e:  # noqa: BLE001
+                record_error(f"{src} entry", e)
+        return results
+
     for cn in class_names:
         C = api(cn)
         if C is None:
             continue
         try:
             coll = C(dgn_file)
-            items = list(iterate(coll))
-            if items:
-                return items, cn
         except Exception:
             continue
+        results = run(coll, cn)
+        if results:
+            return results, cn
     for owner_name, method in static_getters:
-        owner = api(owner_name) if isinstance(owner_name, str) else owner_name
-        if owner is None:
+        owner = api(owner_name)
+        if owner is None or getattr(owner, method, None) is None:
             continue
-        r = unwrap(call(owner, method, args=(dgn_file,)))
-        items = list(iterate(r)) if r is not None else []
-        if items:
-            return items, f"{owner_name}.{method}"
+        coll = unwrap(call(owner, method, args=(dgn_file,)))
+        if coll is None:
+            continue
+        results = run(coll, f"{owner_name}.{method}")
+        if results:
+            return results, f"{owner_name}.{method}"
     return [], None
 
 
+def _owned_style(class_name, name, dgn_file):
+    """Look a style up by name to get an object the caller owns."""
+    C = api(class_name)
+    if C is None or not name:
+        return None
+    return unwrap(call(C, "GetByName", args=(name, dgn_file)))
+
+
 def collect_text_styles(dgn_file) -> dict:
-    items, src = _collection(dgn_file, ("TextStyleCollection", "DgnTextStyleCollection"),
-                             (("DgnTextStyle", "GetFileStyles"), ("DgnTextStyle", "BuildList"),
-                              ("DgnTextStyle", "GetDgnFileStyles"), ("TextStyleManager", "GetTextStyles")))
     prop_enum = api("TextStyleProperty", "DgnTextStyleProperty")
     getters = ("GetProperty", "GetPropertyValue", "GetDoubleProperty", "GetIntegerProperty",
                "GetUInt32Property", "GetBoolProperty", "GetStringProperty",
                "GetColorProperty", "GetFontProperty", "GetDPoint2dProperty")
-    styles = []
-    for st in items:
-        st = unwrap(st)
-        styles.append({
-            "name": s(call(st, "GetName")),
-            "id": call(st, "GetID", "GetId"),
-            "properties": enum_properties(st, prop_enum, getters),
-            "all": introspect(st, 1),
-        })
+
+    def visit(st):
+        name = s(call(st, "GetName"))
+        crumb(f"  text style {name}")
+        rec = {"name": name, "id": call(st, "GetID", "GetId")}
+        own = _owned_style("DgnTextStyle", name, dgn_file)
+        target = own if own is not None else st
+        if PROBE_STYLE_PROPERTIES:
+            rec["properties"] = enum_properties(target, prop_enum, getters)
+        rec["all"] = introspect(target, 1)
+        return rec
+
+    styles, src = _visit_collection(
+        dgn_file, ("TextStyleCollection", "DgnTextStyleCollection"),
+        (("DgnTextStyle", "GetFileStyles"), ("DgnTextStyle", "BuildList"),
+         ("DgnTextStyle", "GetDgnFileStyles"), ("TextStyleManager", "GetTextStyles")),
+        visit)
     return {"source": src, "count": len(styles), "styles": styles}
 
 
 def collect_dimension_styles(dgn_file) -> dict:
-    items, src = _collection(dgn_file, ("DimStyleCollection", "DimensionStyleCollection"),
-                             (("DimensionStyle", "GetFileStyles"), ("DimensionStyle", "BuildList")))
     prop_enum = api("DimStyleProp")
     getters = ("GetDoubleProp", "GetIntegerProp", "GetBooleanProp", "GetStringProp",
                "GetAccuracyProp", "GetLevelProp", "GetColorProp", "GetWeightProp",
                "GetLineStyleProp", "GetFontProp", "GetTemplateFlagProp", "GetUnitsProp",
                "GetCharProp", "GetOneUnitProp", "GetUnitLabelProp", "GetProp")
-    styles = []
-    for st in items:
-        st = unwrap(st)
-        styles.append({
-            "name": s(call(st, "GetName")),
-            "id": call(st, "GetID", "GetId"),
-            "description": s(call(st, "GetDescription")),
-            "properties": enum_properties(st, prop_enum, getters),
-            "all": introspect(st, 1),
-        })
+
+    def visit(st):
+        name = s(call(st, "GetName"))
+        crumb(f"  dimension style {name}")
+        rec = {"name": name, "id": call(st, "GetID", "GetId"),
+               "description": s(call(st, "GetDescription"))}
+        own = _owned_style("DimensionStyle", name, dgn_file)
+        target = own if own is not None else st
+        if PROBE_STYLE_PROPERTIES:
+            rec["properties"] = enum_properties(target, prop_enum, getters)
+        rec["all"] = introspect(target, 1)
+        return rec
+
+    styles, src = _visit_collection(
+        dgn_file, ("DimStyleCollection", "DimensionStyleCollection"),
+        (("DimensionStyle", "GetFileStyles"), ("DimensionStyle", "BuildList")),
+        visit)
     return {"source": src, "count": len(styles), "styles": styles}
 
 
 def collect_multiline_styles(dgn_file) -> dict:
-    items, src = _collection(dgn_file, ("MultilineStyleCollection",),
-                             (("MultilineStyle", "GetFileStyles"),))
-    styles = []
-    for st in items:
-        st = unwrap(st)
+    def visit(st):
+        name = s(call(st, "GetName"))
+        crumb(f"  multiline style {name}")
+        own = _owned_style("MultilineStyle", name, dgn_file)
+        target = own if own is not None else st
         profiles = []
-        n = call(st, "GetProfileLineCount", "GetProfileCount")
+        n = call(target, "GetProfileLineCount", "GetProfileCount")
         if isinstance(n, int):
             for i in range(n):
-                p = call(st, "GetProfile", "GetProfileCP", args=(i,))
+                p = call(target, "GetProfile", "GetProfileCP", args=(i,))
                 if p is not None:
-                    profiles.append(introspect(p, 1))
-        styles.append({"name": s(call(st, "GetName")), "id": call(st, "GetID", "GetId"),
-                       "profiles": profiles, "all": introspect(st, 1)})
+                    profiles.append(introspect(p, 1) or to_plain(p, 0))
+        return {"name": name, "id": call(st, "GetID", "GetId"),
+                "profiles": profiles, "all": introspect(target, 1)}
+
+    styles, src = _visit_collection(
+        dgn_file, ("MultilineStyleCollection",), (("MultilineStyle", "GetFileStyles"),), visit)
     return {"source": src, "count": len(styles), "styles": styles}
 
 
 def collect_display_styles(dgn_file) -> dict:
-    items: list = []
+    def visit(d):
+        name = s(call(d, "GetName"))
+        crumb(f"  display style {name}")
+        return {"name": name, "index": call(d, "GetIndex"), "all": introspect(d, 1)}
+
+    styles: list = []
     src = None
     DSL = api("DisplayStyleList")
     DSLO = api("DisplayStyleListOptions")
@@ -1438,22 +1497,20 @@ def collect_display_styles(dgn_file) -> dict:
         opts = list(enum_members(DSLO).values()) if DSLO is not None else []
         for args in [(dgn_file, o) for o in opts] + [(dgn_file,)]:
             try:
-                items = list(iterate(DSL(*args)))
-                if items:
-                    src = "DisplayStyleList"
-                    break
+                coll = DSL(*args)
             except Exception:
                 continue
-    if not items:
-        DSM = api("DisplayStyleManager")
-        for m in ("GetDisplayStylesForFile", "GetDisplayStyles", "GetDisplayStylesInFile"):
-            r = unwrap(call(DSM, m, args=(dgn_file,)))
-            items = list(iterate(r)) if r is not None else []
-            if items:
-                src = f"DisplayStyleManager.{m}"
+            styles = [visit(unwrap(d)) for d in iterate(coll)]
+            if styles:
+                src = "DisplayStyleList"
                 break
-    styles = [{"name": s(call(unwrap(d), "GetName")), "index": call(unwrap(d), "GetIndex"),
-               "all": introspect(unwrap(d), 1)} for d in items]
+    if not styles:
+        styles, src = _visit_collection(
+            dgn_file, (),
+            (("DisplayStyleManager", "GetDisplayStylesForFile"),
+             ("DisplayStyleManager", "GetDisplayStyles"),
+             ("DisplayStyleManager", "GetDisplayStylesInFile")),
+            visit)
     return {"source": src, "count": len(styles), "styles": styles}
 
 
@@ -1482,11 +1539,9 @@ def collect_fonts(dgn_file) -> dict:
 
 
 def collect_item_types(dgn_file) -> dict:
-    libs, src = _collection(dgn_file, ("ItemTypeLibraries",),
-                            (("ItemTypeLibrary", "GetLibrariesInFile"), ("ItemTypeLibrary", "PopulateListFromFile")))
-    out = []
-    for lib in libs:
-        lib = unwrap(lib)
+    def visit(lib):
+        name = s(call(lib, "GetName"))
+        crumb(f"  item type library {name}")
         types = []
         for it in iterate(lib):
             props = []
@@ -1495,45 +1550,49 @@ def collect_item_types(dgn_file) -> dict:
                               "type": to_plain(call(p, "GetType")), "all": introspect(p, 0)})
             types.append({"name": s(call(it, "GetName")), "label": s(call(it, "GetDisplayLabel", "GetLabel")),
                           "properties": props, "all": introspect(it, 0)})
-        out.append({"name": s(call(lib, "GetName")), "label": s(call(lib, "GetDisplayLabel", "GetLabel")),
-                    "item_types": types, "all": introspect(lib, 0)})
-    return {"source": src, "count": len(out), "libraries": out}
+        return {"name": name, "label": s(call(lib, "GetDisplayLabel", "GetLabel")),
+                "item_types": types, "all": introspect(lib, 0)}
+
+    libs, src = _visit_collection(
+        dgn_file, ("ItemTypeLibraries",),
+        (("ItemTypeLibrary", "GetLibrariesInFile"), ("ItemTypeLibrary", "PopulateListFromFile")),
+        visit)
+    return {"source": src, "count": len(libs), "libraries": libs}
 
 
 def collect_element_templates(dgn_file) -> dict:
-    items: list = []
-    src = None
-    for cls, m, args in (("ElementTemplateNode", "GetAllTemplatesInFile", (dgn_file,)),
-                         ("ElementTemplateNode", "GetTemplatesInFile", (dgn_file,)),
-                         ("ElementTemplateUtils", "GetAllTemplates", (dgn_file,)),
-                         ("ETemplateCollection", None, (dgn_file,)),
-                         ("ElementTemplateNodeCollection", None, (dgn_file,))):
-        C = api(cls)
-        if C is None:
-            continue
-        try:
-            r = C(*args) if m is None else unwrap(getattr(C, m)(*args))
-            items = list(iterate(r))
-        except Exception:
-            items = []
-        if items:
-            src = f"{cls}.{m}" if m else cls
-            break
-
     def walk(node, path):
         node = unwrap(node)
         name = s(call(node, "GetName"))
         full = f"{path}/{name}" if path else name
+        crumb(f"  element template {full}")
         rec = {"path": full, "name": name, "is_group": call(node, "IsGroup", "IsGroupNode"),
                "all": introspect(node, 1)}
         res = [rec]
-        for child in iterate(call(node, "GetChildren", "GetChildNodes")):
+        children = call(node, "GetChildren", "GetChildNodes")
+        for child in iterate(children):
             res.extend(walk(child, full))
         return res
 
-    templates = []
-    for n in items:
-        templates.extend(walk(n, ""))
+    templates: list = []
+    src = None
+    for cls, m in (("ElementTemplateNode", "GetAllTemplatesInFile"),
+                   ("ElementTemplateNode", "GetTemplatesInFile"),
+                   ("ElementTemplateUtils", "GetAllTemplates"),
+                   ("ETemplateCollection", None),
+                   ("ElementTemplateNodeCollection", None)):
+        C = api(cls)
+        if C is None or (m is not None and getattr(C, m, None) is None):
+            continue
+        try:
+            coll = C(dgn_file) if m is None else unwrap(getattr(C, m)(dgn_file))
+        except Exception:
+            continue
+        for n in iterate(coll):
+            templates.extend(walk(n, ""))
+        if templates:
+            src = f"{cls}.{m}" if m else cls
+            break
     if not templates:
         NOTES.append("Element template API not exposed; see dictionary_inventory for raw entries.")
     return {"source": src, "count": len(templates), "templates": templates}
