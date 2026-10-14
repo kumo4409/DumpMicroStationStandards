@@ -52,7 +52,6 @@ import csv
 import datetime as _dt
 import enum
 import faulthandler
-import fnmatch
 import getpass
 import glob
 import json
@@ -90,10 +89,10 @@ SCAN_CFG_FILES = True
 # more properties but calls native methods blindly; some of them can crash
 # MicroStation. Leave off unless you need the extra "all" detail.
 DEEP_INTROSPECTION = False
-# Enumerate config variables through a native callback. Off by default:
-# Python callbacks from native code are a crash risk. The .cfg scan finds
-# the variable names without it.
-USE_NATIVE_VARIABLE_ITERATION = False
+# Enumerate config variables with ConfigurationManager.IterateThroughVariables
+# (IConfigVariableIterator), which also reports each variable's level and
+# lock. The .cfg scan below still runs and fills any gaps.
+USE_NATIVE_VARIABLE_ITERATION = True
 # Sections to skip, e.g. {"active_model_usage", "dictionary"}. If a run
 # crashes, crash.log / progress.log name the section; add it here.
 SKIP_SECTIONS: set[str] = set()
@@ -261,9 +260,22 @@ def api_all(name: str) -> list:
     return out
 
 
+_MODULE_PRIORITY = ("MSPyDgnPlatform", "MSPyMstnPlatform", "MSPyECObjects",
+                    "MSPyBentley", "MSPyBentleyGeom", "MSPyDgnView")
+
+
 def api(*names):
-    """Return the first MicroStation API symbol that exists, else None."""
+    """Return the first MicroStation API symbol that exists, else None.
+
+    Looked up module by module (MSPyDgnPlatform first) rather than from the
+    star imports: some names exist in two modules, e.g. MSPyMstnPlatform has
+    a static-helper class also called DgnFile that cannot open files.
+    """
     for n in names:
+        for mod_name in _MODULE_PRIORITY:
+            obj = getattr(_MODULES.get(mod_name), n, None)
+            if obj is not None:
+                return obj
         obj = _G.get(n)
         if obj is not None:
             return obj
@@ -789,6 +801,9 @@ MS_TASKNAVIGATION_CONFIGURATION MS_WORKFLOW MS_RIBBONWORKFLOW
 """.split()
 
 
+CFG_META: dict[str, dict] = {}   # name -> {level, locked} from IConfigVariableIterator
+
+
 def discover_cfg_var_names() -> tuple[set[str], list[str], str]:
     """Return (names, scanned cfg files, method used)."""
     names: set[str] = set(KNOWN_CFG_VARS)
@@ -796,7 +811,7 @@ def discover_cfg_var_names() -> tuple[set[str], list[str], str]:
 
     # 1) Native enumeration (if the bindings expose it)
     CM = api("ConfigurationManager")
-    Delegate = api("IVariableIterationDelegate")
+    Delegate = api("IConfigVariableIterator")
     if (USE_NATIVE_VARIABLE_ITERATION and CM is not None and Delegate is not None
             and hasattr(CM, "IterateThroughVariables")):
         try:
@@ -805,9 +820,9 @@ def discover_cfg_var_names() -> tuple[set[str], list[str], str]:
                     super().__init__()
                     self.found: list[str] = []
 
-                def EachVariableCallback(self, *args):  # noqa: N802
-                    if args:
-                        self.found.append(s(args[0]))
+                def EachConfigVariable(self, name, value, level, locked):  # noqa: N802
+                    self.found.append(s(name))
+                    CFG_META[s(name)] = {"level": to_plain(level), "locked": bool(locked)}
 
             c = _Collector()
             CM.IterateThroughVariables(c)
@@ -892,6 +907,7 @@ def collect_configuration() -> dict:
         "discovery_method": method,
         "variable_count": len(variables),
         "variables": variables,
+        "variable_meta": {k: v for k, v in CFG_META.items() if k in variables},
         "cfg_files_scanned": scanned,
     }
 
@@ -950,21 +966,21 @@ def active_dgn_file():
 
 
 def active_model_ref():
-    return session_get("GetActiveDgnModelRefP", "ActiveDgnModelRef", "GetActiveDgnModelRef")
+    return session_get("GetActiveDgnModelRef")
 
 
 def active_model():
-    m = session_get("GetActiveDgnModelP", "ActiveDgnModel", "GetActiveDgnModel")
+    m = session_get("GetActiveDgnModel")
     if m is None:
         mr = active_model_ref()
-        m = call(mr, "GetDgnModelP", "GetDgnModel")
+        m = call(mr, "GetDgnModel")
     return m
 
 
 def file_name(dgn_file) -> str | None:
     n = call(dgn_file, "GetFileName")
     if n is None:
-        doc = call(dgn_file, "GetDocument", "GetDocumentPtr")
+        doc = call(dgn_file, "GetDocument")
         n = call(doc, "GetFileName")
     return s(n)
 
@@ -1030,14 +1046,8 @@ def model_index_items(dgn_file):
     """Yield model index entries. A generator, so the native index (and its
     iterator) stay alive while the caller reads each entry."""
     idx = call(dgn_file, "GetModelIndex")
-    produced = False
     for item in iterate(idx):
-        produced = True
         yield item
-    if not produced:
-        coll = call(dgn_file, "GetModelItemsList", "GetModelIndexCollection")
-        for item in iterate(coll):
-            yield item
 
 
 def load_model(dgn_file, model_id):
@@ -1069,13 +1079,9 @@ def model_elements(model, limit=None):
         return
     produced = False
     count = 0
-    for getter in ("GetControlElementsP", "GetControlElements",
-                   "GetGraphicElementsP", "GetGraphicElements"):
+    for getter in ("GetControlElements", "GetGraphicElements"):
         coll = call(model, getter)
         if coll is None:
-            continue
-        # avoid double-iterating the P / non-P twin of the same list
-        if getter.endswith("P") and call(model, getter[:-1]) is not None:
             continue
         for r in iterate(coll):
             produced = True
@@ -1161,18 +1167,18 @@ def element_info(eh) -> dict:
 
 def cell_name_of(eh) -> tuple[str | None, str | None]:
     """Extract (name, description) from a cell / shared cell element."""
-    name = desc = None
     h = call(eh, "GetHandler")
-    for target in (h, api("CellUtil"), api("ICellQuery")):
-        if target is None:
-            continue
-        if name is None:
-            name = call_out(target, "ExtractName", eh) or call_out(target, "GetCellName", eh)
-        if desc is None:
-            desc = call_out(target, "ExtractDescription", eh)
-        if name:
-            break
-    return name, desc
+    return _string_in(call(h, "ExtractName", args=(eh,))), \
+        _string_in(call(h, "ExtractDescription", args=(eh,)))
+
+
+def _string_in(result) -> str | None:
+    """The string part of a (status, WString) style result (ICellQuery)."""
+    items = result if isinstance(result, tuple) else (result,)
+    for x in items:
+        if isinstance(x, str) or type(x).__name__ in ("WString", "Utf8String", "AString"):
+            return s(x) or None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1231,7 +1237,7 @@ def unit_record(u) -> dict | None:
 
 
 def model_info_record(model) -> dict:
-    mi = call(model, "GetModelInfo", "GetModelInfoCP")
+    mi = call(model, "GetModelInfo")
     d = {
         "name": s(call(model, "GetModelName")),
         "id": call(model, "GetModelId"),
@@ -1279,12 +1285,17 @@ def collect_models(dgn_file, load_each: bool) -> list[dict]:
             "id": call(item, "GetModelId"),
             "type": to_plain(call(item, "GetModelType")),
             "cell_type": to_plain(call(item, "GetCellType")),
-            "is_3d": call(item, "Is3D", "Is3d"),
+            "is_3d": call(item, "Is3D"),
             "is_hidden": call(item, "IsHidden"),
-            "is_cell": None,
+            "is_cell": call(item, "IsCell"),
+            "is_annotation_cell": call(item, "IsAnnotationCell"),
+            "is_markup": call(item, "IsMarkup"),
             "all": introspect(item, 1),
         }
-        rec["is_cell"] = _is_cell_model(rec)
+        if call(item, "IsDeleted"):
+            continue
+        if rec["is_cell"] is None:
+            rec["is_cell"] = _is_cell_model(rec)
         out.append(rec)
     # Load models only after the index iteration has finished: loading can
     # change the index and invalidate a live iterator.
@@ -1360,82 +1371,51 @@ def line_style_name(num, dgn_file=None, cache: dict | None = None) -> str | None
         return s(num)
     if 0 <= num <= 7:
         return str(num)
+    if num not in LINE_STYLE_NAMES:
+        for m in _LS_LOOKUP_MAPS:
+            e = call(m, "GetLineStyleEntry", args=(num,))
+            name = s(call(e, "GetStyleName")) if e is not None else None
+            if name:
+                LINE_STYLE_NAMES[num] = name
+                break
     return LINE_STYLE_NAMES.get(num)
 
 
 def _ls_entry(e) -> dict:
-    d = {
-        "name": s(call(e, "GetStyleName", "GetName")),
-        "number": call(e, "GetStyleNumber", "GetNumber"),
-        "all": introspect(e, 1),
+    return {
+        "name": s(call(e, "GetStyleName")),
+        "number": call(e, "GetStyleNumber"),
+        "source_file": s(call(e, "GetSourceFileName")),
+        "definition_location": to_plain(call(e, "GetDefinitionLocation")),
     }
-    comp = call(e, "GetComponent", "GetComponentCP")
-    if comp is not None:
-        d["component"] = {"type": to_plain(call(comp, "GetElementType", "GetComponentType")),
-                          "description": s(call(comp, "GetDescription")),
-                          "all": introspect(comp, 0)}
-    return d
 
 
-def _read_line_style_map(candidates) -> tuple[list[dict], str | None, dict]:
-    """Try each (owner, method, args) and return the first map that has
-    entries. An empty map is not accepted: the system map comes back empty
-    until it has been loaded, so the loading variants are listed first."""
-    first_props: dict = {}
-    for owner, fn, args in candidates:
-        if owner is None or getattr(owner, fn, None) is None:
-            continue
-        m = unwrap(call(owner, fn, args=args))
-        if m is None:
-            continue
-        entries = [_ls_entry(e) for e in iterate(m)]
-        if entries:
-            return entries, f"{getattr(owner, '__name__', type(owner).__name__)}.{fn}", {}
-        if not first_props:
-            first_props = introspect(m, 1)
-    return [], None, first_props
+# Native maps of the seed (active) file and the system, kept for
+# number -> name lookups with GetLineStyleEntry(number).
+_LS_LOOKUP_MAPS: list = []
 
 
 def collect_line_styles(dgn_file) -> dict:
     """Line styles of the seed (active) file and the system/resource map.
 
-    Only called for the seed: the same calls caused access violations on
-    DGN libraries opened by this script.
+    Only called for the seed: DgnFile.GetLineStyleMap() on DGN libraries
+    opened by this script caused access violations.
     """
-    LsMap = api("LsMap")
-    LsCache = api("LsCache")
-    LsDgnFileMap = api("LsDgnFileMap")
-    LsSystemMap = api("LsSystemMap")
     LSM = api("LineStyleManager")
-    out: dict = {}
-    out["file"], out["file_source"], props = _read_line_style_map((
-        (LsMap, "GetMapPtr", (dgn_file, True)),
-        (LsDgnFileMap, "GetMapPtr", (dgn_file, True)),
-        (LsMap, "GetMapPtr", (dgn_file,)),
-        (LsCache, "GetDgnFileCache", (dgn_file,)),
-        (LSM, "GetNameMap", (dgn_file,)),
-        (dgn_file, "GetLineStyleMap", ()),
-    ))
-    if props:
-        out["file_map_properties"] = props
-    # Make sure the line style resources are loaded before asking for the
-    # system map (it is loaded on first use otherwise).
-    for owner, fn in ((LSM, "Initialize"), (LsSystemMap, "Load"), (LsSystemMap, "LoadSystemMap")):
-        if owner is not None and getattr(owner, fn, None) is not None:
-            call(owner, fn)
-    out["system"], out["system_source"], props = _read_line_style_map((
-        (LsSystemMap, "GetSystemMapP", (True,)),
-        (LsMap, "GetSystemMapP", (True,)),
-        (LsSystemMap, "GetSystemMapR", ()),
-        (LsSystemMap, "GetSystemMap", ()),
-        (LSM, "GetSystemMap", ()),
-    ))
-    if props:
-        out["system_map_properties"] = props
+    LsSystemMap = api("LsSystemMap")
+    out: dict = {"file": [], "system": []}
+    file_map = call(LSM, "GetLineStyleMap", args=(dgn_file,))
+    sys_map = call(LSM, "GetSystemLineStyleMap") or call(LsSystemMap, "GetSystemMap")
+    for kind, m in (("file", file_map), ("system", sys_map)):
+        if m is None:
+            continue
+        _LS_LOOKUP_MAPS.append(m)
+        out[kind + "_map_file"] = s(call(m, "GetFileName"))
+        for e in iterate(m):
+            out[kind].append(_ls_entry(e))
     if not out["system"]:
-        NOTES.append("System line style map came back empty; custom line style names on "
-                     "library levels may be blank. Opening the Line Styles dialog in "
-                     "MicroStation before running loads it.")
+        NOTES.append("System line style map came back empty; line style names may be "
+                     "blank. Opening the Line Styles dialog before running loads it.")
     out["resource_files"] = split_paths(cfg_get("MS_SYMBRSRC"))
     out["linestyle_dgnlib_vars"] = {k: cfg_get(k) for k in ("MS_LINESTYLEPATH", "MS_DGNLIBLIST")}
     return out
@@ -1455,40 +1435,58 @@ def _symb(obj, value_getters):
     return to_plain(obj, 1)
 
 
+def _definition_file(defn) -> str | None:
+    """File that defines a by-level/override setting (LevelDefinition*.GetDefinitionFile)."""
+    f = call(defn, "GetDefinitionFile")
+    return s(call(f, "GetFileName")) if f is not None else None
+
+
 def level_record(lh, dgn_file, colors: list[dict], ls_cache: dict) -> dict:
+    """One level. Every getter here is listed for LevelHandle in Bentley's
+    MSPyDgnPlatform stubs."""
     rec = {
         "name": s(call(lh, "GetName")),
-        "display_name": s(call(lh, "GetDisplayName")),
+        "display_name": call_out(lh, "GetDisplayName"),
         "id": call(lh, "GetLevelId"),
         "code": call(lh, "GetLevelCode"),
+        "code_auto_generated": call(lh, "GetCodeAutoGenerated"),
         "description": s(call(lh, "GetDescription")),
-        "parent_id": call(lh, "GetParentLevelId"),
-        "is_valid": call(lh, "IsValid"),
+        "is_alias": call(lh, "IsAlias"),
+        "status": to_plain(call(lh, "GetStatus")),
     }
     # By-level symbology
     bl_color = call(lh, "GetByLevelColor")
-    rec["color"] = _symb(bl_color, ("GetColor",))
-    rec["color_is_external"] = call(bl_color, "IsExternal", "IsExtended")
-    bl_style = call(lh, "GetByLevelLineStyle", "GetByLevelStyle")
-    rec["line_style"] = _symb(bl_style, ("GetStyle",))
-    rec["line_style_params"] = to_plain(call(bl_style, "GetStyleParams", "GetStyleParamsCP"), 1)
-    rec["weight"] = _symb(call(lh, "GetByLevelWeight"), ("GetWeight",))
-    rec["material_id"] = to_plain(call(call(lh, "GetByLevelMaterial"), "GetId"), 0)
-    rec["fill_color"] = _symb(call(lh, "GetByLevelFillColor"), ("GetColor",))
-    # Override symbology
-    rec["override_color"] = _symb(call(lh, "GetOverrideColor"), ("GetColor",))
-    rec["override_line_style"] = _symb(call(lh, "GetOverrideLineStyle", "GetOverrideStyle"), ("GetStyle",))
-    rec["override_weight"] = _symb(call(lh, "GetOverrideWeight"), ("GetWeight",))
+    rec["color"] = call(bl_color, "GetColor")
+    rec["color_defined_in"] = _definition_file(bl_color)
+    bl_style = call(lh, "GetByLevelLineStyle")
+    rec["line_style"] = call(bl_style, "GetStyle")
+    rec["line_style_defined_in"] = _definition_file(bl_style)
+    if call(bl_style, "HasStyleParams"):
+        rec["line_style_params"] = to_plain(call(bl_style, "GetStyleParams"), 1)
+    rec["weight"] = call(lh, "GetByLevelWeight")
+    rec["material_id"] = call(call(lh, "GetByLevelMaterial"), "GetElementId")
+    # Overrides, with the flags that say whether each one is in use
+    rec["override_color_on"] = call(lh, "GetOverrideColorOn")
+    rec["override_color"] = call(call(lh, "GetOverrideColor"), "GetColor")
+    rec["override_line_style_on"] = call(lh, "GetOverrideLineStyleOn")
+    rec["override_line_style"] = call(call(lh, "GetOverrideLineStyle"), "GetStyle")
+    rec["override_weight_on"] = call(lh, "GetOverrideWeightOn")
+    rec["override_weight"] = call(lh, "GetOverrideWeight")
+    rec["override_material_on"] = call(lh, "GetOverrideMaterialOn")
+    rec["override_material_id"] = call(call(lh, "GetOverrideMaterial"), "GetElementId")
     # Flags
-    rec["display"] = call(lh, "GetDisplay", "IsDisplayed")
-    rec["frozen"] = call(lh, "GetFrozen", "IsFrozen")
-    rec["locked"] = call(lh, "GetLocked", "IsLocked")
-    rec["plot"] = call(lh, "GetPlot", "IsPlot")
+    rec["display"] = call(lh, "GetDisplay")
+    rec["frozen"] = call(lh, "GetFrozen")
+    rec["hidden"] = call(lh, "GetHidden")
+    rec["read_only"] = call(lh, "GetReadOnly")
+    rec["locate"] = call(lh, "GetLocate")
+    rec["snap"] = call(lh, "GetSnap")
+    rec["plot"] = call(lh, "GetPlot")
+    rec["plot_style_id"] = call(call(lh, "GetPlotStyle"), "GetElementId")
+    rec["by_cell"] = call(lh, "GetByCell")
     rec["transparency"] = call(lh, "GetTransparency")
     rec["display_priority"] = call(lh, "GetDisplayPriority")
     rec["element_access"] = to_plain(call(lh, "GetElementAccess"))
-    rec["is_library_level"] = call(lh, "IsFromLibrary", "GetIsFromLibrary")
-    rec["library_name"] = s(call(lh, "GetLibraryName"))
     # Derived friendly values
     try:
         ci = int(rec["color"]) if rec["color"] is not None else None
@@ -1499,8 +1497,9 @@ def level_record(lh, dgn_file, colors: list[dict], ls_cache: dict) -> dict:
         rec["color_rgb"] = [c.get("red"), c.get("green"), c.get("blue")]
     elif ci is not None and ci > 255:
         rec["color_rgb"] = "extended/color-book"
-    rec["line_style_name"] = line_style_name(rec["line_style"], dgn_file, ls_cache) \
-        if isinstance(rec["line_style"], (int, float)) else None
+    rec["line_style_name"] = line_style_name(rec["line_style"])
+    if rec["override_line_style"] is not None:
+        rec["override_line_style_name"] = line_style_name(rec["override_line_style"])
     rec["all"] = introspect(lh, 1)
     return rec
 
@@ -1549,13 +1548,11 @@ def scope_key(path: str | None, is_seed: bool) -> str:
     return "seed" if is_seed else os.path.basename(path or "").lower()
 
 
-def collect_levels(dgn_file, colors=None, wanted: set[str] | None = None) -> dict:
-    """Levels of one file. `wanted` = upper-case names to keep (None = all)."""
-    cache = call(dgn_file, "GetLevelCache")
+def levels_from_cache(cache, colors=None, wanted: set[str] | None = None) -> dict:
+    """Levels of one FileLevelCache. `wanted` = upper-case names to keep (None = all)."""
     if cache is None:
-        raise RuntimeError("GetLevelCache not available")
+        raise RuntimeError("no level cache")
     colors = colors if colors is not None else []
-    ls_cache: dict = {}
     levels = []
     skipped = 0
     for lh in iterate(cache):
@@ -1565,35 +1562,52 @@ def collect_levels(dgn_file, colors=None, wanted: set[str] | None = None) -> dic
             continue
         crumb(f"  level {lname}")
         try:
-            levels.append(level_record(lh, dgn_file, colors, ls_cache))
+            levels.append(level_record(lh, None, colors, {}))
         except Exception as e:  # noqa: BLE001
             record_error("level", e)
-    # parent names for hierarchy
-    by_id = {l["id"]: l["name"] for l in levels if l.get("id") is not None}
-    for l in levels:
-        pid = l.get("parent_id")
-        if pid not in (None, 0, -1, 0xFFFFFFFF, 0xFFFFFFFE):
-            l["parent_name"] = by_id.get(pid)
-    filters = []
-    for getter in ("GetLevelFilters", "GetFilters"):
-        for f in iterate(call(cache, getter)):
-            filters.append(introspect(f, 1))
-        if filters:
-            break
-    LFC = api("LevelFilterCollection")
-    if not filters and LFC is not None:
-        try:
-            for f in iterate(LFC(dgn_file)):
-                filters.append(introspect(f, 1))
-        except Exception:
-            pass
     return {
         "count": len(levels),
         "skipped_out_of_scope": skipped,
-        "cache_properties": introspect(cache, 0),
         "levels": sorted(levels, key=lambda l: (l.get("name") or "").upper()),
-        "level_filters": filters,
     }
+
+
+def collect_levels(dgn_file, colors=None, wanted: set[str] | None = None) -> dict:
+    return levels_from_cache(call(dgn_file, "GetLevelCache"), colors, wanted)
+
+
+def collect_attached_library_levels(dgn_file, colors, level_scope: dict | None) -> list[dict]:
+    """Levels of the DGN libraries MicroStation has attached to the seed.
+
+    Read through the seed's level cache (FileLevelCache.GetLibraries), so
+    the script does not open the library files itself, and only libraries
+    MicroStation actually uses are included.
+    """
+    libs = call(call(dgn_file, "GetLevelCache"), "GetLibraries") or []
+    out = []
+    for lib in libs:
+        path = s(call(call(lib, "GetDgnFile"), "GetFileName"))
+        key = scope_key(path, False)
+        if level_scope is not None and key not in level_scope:
+            continue
+        crumb(f"  attached library {path}")
+        wanted = None if level_scope is None else level_scope[key]
+        try:
+            out.append({"path": path, "read_from": "attached level library",
+                        "levels": levels_from_cache(lib, colors, wanted)})
+        except Exception as e:  # noqa: BLE001
+            record_error(f"attached library {path}", e)
+    return out
+
+
+def library_level_sets(result: dict) -> list[tuple[str, list[dict]]]:
+    """(library path, levels) for every library whose levels were read."""
+    sets = []
+    for lib in (result.get("attached_libraries") or []) + (result.get("dgn_libraries") or []):
+        levels = (lib.get("levels") or {}).get("levels") or []
+        if lib.get("levels"):
+            sets.append((lib.get("path"), levels))
+    return sets
 
 
 # --- styles -----------------------------------------------------------------
@@ -1649,10 +1663,9 @@ def _owned_style(class_name, name, dgn_file):
 
 
 def collect_text_styles(dgn_file) -> dict:
-    prop_enum = api("TextStyleProperty", "DgnTextStyleProperty")
-    getters = ("GetProperty", "GetPropertyValue", "GetDoubleProperty", "GetIntegerProperty",
-               "GetUInt32Property", "GetBoolProperty", "GetStringProperty",
-               "GetColorProperty", "GetFontProperty", "GetDPoint2dProperty")
+    prop_enum = api("TextStyleProperty")
+    getters = ("GetDoubleProperty", "GetUInt32Property", "GetInt32Property",
+               "GetBoolProperty", "GetFontProperty", "GetDPoint2dProperty")
 
     def visit(st):
         name = s(call(st, "GetName"))
@@ -1677,8 +1690,8 @@ def collect_dimension_styles(dgn_file) -> dict:
     prop_enum = api("DimStyleProp")
     getters = ("GetDoubleProp", "GetIntegerProp", "GetBooleanProp", "GetStringProp",
                "GetAccuracyProp", "GetLevelProp", "GetColorProp", "GetWeightProp",
-               "GetLineStyleProp", "GetFontProp", "GetTemplateFlagProp", "GetUnitsProp",
-               "GetCharProp", "GetOneUnitProp", "GetUnitLabelProp", "GetProp")
+               "GetLineStyleProp", "GetFontProp", "GetCharProp", "GetOneUnitProp",
+               "GetTextStyleProp")
 
     def visit(st):
         name = s(call(st, "GetName"))
@@ -1706,10 +1719,10 @@ def collect_multiline_styles(dgn_file) -> dict:
         own = _owned_style("MultilineStyle", name, dgn_file)
         target = own if own is not None else st
         profiles = []
-        n = call(target, "GetProfileLineCount", "GetProfileCount")
+        n = call(target, "GetProfileLineCount")
         if isinstance(n, int):
             for i in range(n):
-                p = call(target, "GetProfile", "GetProfileCP", args=(i,))
+                p = call(target, "GetProfile", args=(i,))
                 if p is not None:
                     profiles.append(introspect(p, 1) or to_plain(p, 0))
         return {"name": name, "id": call(st, "GetID", "GetId"),
@@ -1721,34 +1734,17 @@ def collect_multiline_styles(dgn_file) -> dict:
 
 
 def collect_display_styles(dgn_file) -> dict:
-    def visit(d):
+    DSM = api("DisplayStyleManager")
+    styles = []
+    for i in range(500):
+        d = call(DSM, "GetDisplayStyleByIndex", args=(i, dgn_file))
+        if d is None:
+            break
         name = s(call(d, "GetName"))
         crumb(f"  display style {name}")
-        return {"name": name, "index": call(d, "GetIndex"), "all": introspect(d, 1)}
-
-    styles: list = []
-    src = None
-    DSL = api("DisplayStyleList")
-    DSLO = api("DisplayStyleListOptions")
-    if DSL is not None:
-        opts = list(enum_members(DSLO).values()) if DSLO is not None else []
-        for args in [(dgn_file, o) for o in opts] + [(dgn_file,)]:
-            try:
-                coll = DSL(*args)
-            except Exception:
-                continue
-            styles = [visit(unwrap(d)) for d in iterate(coll)]
-            if styles:
-                src = "DisplayStyleList"
-                break
-    if not styles:
-        styles, src = _visit_collection(
-            dgn_file, (),
-            (("DisplayStyleManager", "GetDisplayStylesForFile"),
-             ("DisplayStyleManager", "GetDisplayStyles"),
-             ("DisplayStyleManager", "GetDisplayStylesInFile")),
-            visit)
-    return {"source": src, "count": len(styles), "styles": styles}
+        styles.append({"index": i, "name": name, "all": introspect(d, 1)})
+    return {"source": "DisplayStyleManager.GetDisplayStyleByIndex", "count": len(styles),
+            "styles": styles}
 
 
 def collect_fonts(dgn_file) -> dict:
@@ -1780,59 +1776,20 @@ def collect_item_types(dgn_file) -> dict:
         name = s(call(lib, "GetName"))
         crumb(f"  item type library {name}")
         types = []
-        for it in iterate(lib):
+        n = call(lib, "GetItemTypeCount") or 0
+        for k in range(int(n)):
+            it = call(lib, "GetItemTypeAt", args=(k,))
+            if it is None:
+                continue
             props = []
             for p in iterate(it):
-                props.append({"name": s(call(p, "GetName")), "label": s(call(p, "GetDisplayLabel", "GetLabel")),
-                              "type": to_plain(call(p, "GetType")), "all": introspect(p, 0)})
-            types.append({"name": s(call(it, "GetName")), "label": s(call(it, "GetDisplayLabel", "GetLabel")),
-                          "properties": props, "all": introspect(it, 0)})
-        return {"name": name, "label": s(call(lib, "GetDisplayLabel", "GetLabel")),
-                "item_types": types, "all": introspect(lib, 0)}
+                props.append({"name": s(call(p, "GetName")), "type": to_plain(call(p, "GetType"))})
+            types.append({"name": s(call(it, "GetName")), "property_count": call(it, "GetPropertyCount"),
+                          "properties": props})
+        return {"name": name, "item_types": types}
 
-    libs, src = _visit_collection(
-        dgn_file, ("ItemTypeLibraries",),
-        (("ItemTypeLibrary", "GetLibrariesInFile"), ("ItemTypeLibrary", "PopulateListFromFile")),
-        visit)
+    libs, src = _visit_collection(dgn_file, ("ItemTypeLibraries",), (), visit)
     return {"source": src, "count": len(libs), "libraries": libs}
-
-
-def collect_element_templates(dgn_file) -> dict:
-    def walk(node, path):
-        node = unwrap(node)
-        name = s(call(node, "GetName"))
-        full = f"{path}/{name}" if path else name
-        crumb(f"  element template {full}")
-        rec = {"path": full, "name": name, "is_group": call(node, "IsGroup", "IsGroupNode"),
-               "all": introspect(node, 1)}
-        res = [rec]
-        children = call(node, "GetChildren", "GetChildNodes")
-        for child in iterate(children):
-            res.extend(walk(child, full))
-        return res
-
-    templates: list = []
-    src = None
-    for cls, m in (("ElementTemplateNode", "GetAllTemplatesInFile"),
-                   ("ElementTemplateNode", "GetTemplatesInFile"),
-                   ("ElementTemplateUtils", "GetAllTemplates"),
-                   ("ETemplateCollection", None),
-                   ("ElementTemplateNodeCollection", None)):
-        C = api(cls)
-        if C is None or (m is not None and getattr(C, m, None) is None):
-            continue
-        try:
-            coll = C(dgn_file) if m is None else unwrap(getattr(C, m)(dgn_file))
-        except Exception:
-            continue
-        for n in iterate(coll):
-            templates.extend(walk(n, ""))
-        if templates:
-            src = f"{cls}.{m}" if m else cls
-            break
-    if not templates:
-        NOTES.append("Element template API not exposed; see dictionary_inventory for raw entries.")
-    return {"source": src, "count": len(templates), "templates": templates}
 
 
 def collect_named_views(dgn_file) -> dict:
@@ -1851,12 +1808,12 @@ def collect_named_views(dgn_file) -> dict:
 
 def collect_references(model_ref) -> list[dict]:
     refs = []
-    coll = call(model_ref, "GetDgnAttachmentsP", "GetDgnAttachments")
+    coll = call(model_ref, "GetDgnAttachments")
     for a in iterate(coll):
         refs.append({
             "logical_name": s(call(a, "GetLogicalName")),
             "file": s(call(a, "GetAttachFileName")),
-            "full_path": s(call(a, "GetAttachFullFileSpec")),
+            "full_path": s(call(a, "GetAttachFullFileSpec", args=(False,))),
             "model": s(call(a, "GetAttachModelName")),
             "description": s(call(a, "GetDescription")),
             "all": introspect(a, 1),
@@ -1876,17 +1833,7 @@ def collect_gcs(model) -> dict | None:
             "all": introspect(gcs, 0)}
 
 
-def collect_active_settings() -> dict:
-    # Only static getters via introspection. ActiveParams.GetValue is not
-    # called: it writes into a caller-typed buffer and is unsafe to probe.
-    out = {}
-    for cls in ("Settings", "ActiveSettings"):
-        C = api(cls)
-        if C is not None:
-            out[cls] = introspect(C, 0)
-    if not out:
-        NOTES.append("Active settings need DEEP_INTROSPECTION = True")
-    return out
+
 
 
 # --- cells / dictionary ----------------------------------------------------
@@ -1922,15 +1869,15 @@ def level_scope_report(level_scope: dict, result: dict) -> dict:
     """Which in-scope levels were found, and which were not."""
     found: dict[str, set[str]] = {"seed": {(l.get("name") or "").upper() for l in
                                            ((result.get("seed_file") or {}).get("levels") or {}).get("levels") or []}}
-    for lib in result.get("dgn_libraries") or []:
-        names = {(l.get("name") or "").upper() for l in (lib.get("levels") or {}).get("levels") or []}
-        found.setdefault(scope_key(lib.get("path"), False), set()).update(names)
+    for path, levels in library_level_sets(result):
+        names = {(l.get("name") or "").upper() for l in levels}
+        found.setdefault(scope_key(path, False), set()).update(names)
     # the same level name read from more than one file with the same name
     seen: dict[tuple, list[str]] = {}
-    for lib in result.get("dgn_libraries") or []:
-        key = scope_key(lib.get("path"), False)
-        for l in (lib.get("levels") or {}).get("levels") or []:
-            seen.setdefault((key, (l.get("name") or "").upper()), []).append(lib.get("path"))
+    for path, levels in library_level_sets(result):
+        key = scope_key(path, False)
+        for l in levels:
+            seen.setdefault((key, (l.get("name") or "").upper()), []).append(path)
     duplicates = {f"{k[0]}: {k[1]}": v for k, v in seen.items() if len(v) > 1}
     missing = {k: sorted(v - found.get(k, set())) for k, v in level_scope.items()}
     missing = {k: v for k, v in missing.items() if v}
@@ -2053,7 +2000,6 @@ def collect_file_standards(dgn_file, full: bool, is_cell_library: bool = False,
     d["multiline_styles"] = section("multiline_styles", collect_multiline_styles, dgn_file)
     d["display_styles"] = section("display_styles", collect_display_styles, dgn_file)
     d["item_types"] = section("item_types", collect_item_types, dgn_file)
-    d["element_templates"] = section("element_templates", collect_element_templates, dgn_file)
     d["views"] = section("views", collect_named_views, dgn_file)
     d["dictionary_inventory"] = section("dictionary", collect_dictionary, dgn_file)
     return d
@@ -2138,15 +2084,20 @@ def write_outputs(result: dict, out_dir: str) -> list[str]:
     # Seed levels plus every DGN library's levels: in a WorkSpace most
     # standard levels live in the dgnlibs, not in the seed itself.
     levels = [{"source": "seed", **l} for l in (seed.get("levels") or {}).get("levels") or []]
-    for lib in result.get("dgn_libraries") or []:
-        for l in (lib.get("levels") or {}).get("levels") or []:
-            levels.append({"source": lib.get("path"), **l})
+    for path, lib_levels in library_level_sets(result):
+        for l in lib_levels:
+            levels.append({"source": path, **l})
     if levels:
         p = os.path.join(out_dir, "levels.csv")
-        write_csv(p, levels, ["source", "name", "id", "code", "description", "parent_name", "color", "color_rgb",
-                              "line_style", "line_style_name", "weight", "display", "frozen", "locked",
-                              "plot", "transparency", "display_priority", "element_access",
-                              "is_library_level", "library_name"])
+        write_csv(p, levels, ["source", "name", "display_name", "id", "code", "description",
+                              "color", "color_rgb", "line_style", "line_style_name", "weight",
+                              "override_color_on", "override_color", "override_line_style_on",
+                              "override_line_style", "override_line_style_name",
+                              "override_weight_on", "override_weight",
+                              "display", "frozen", "hidden", "read_only", "locate", "snap", "plot",
+                              "plot_style_id", "transparency", "display_priority", "element_access",
+                              "by_cell", "is_alias", "material_id", "color_defined_in",
+                              "line_style_defined_in"])
         written.append(p)
 
     variables = (result.get("configuration") or {}).get("variables") or {}
@@ -2220,8 +2171,7 @@ def build_summary(r: dict) -> str:
         f"Duplicate levels     : {len((r.get('level_scope') or {}).get('duplicates') or {})} "
         f"(same level in two copies of a library; see level_scope.duplicates)",
         f"Levels (seed)        : {_count(seed, 'levels', 'count')}",
-        f"Levels (DGN libs)    : {sum(_count(l, 'levels', 'count') for l in r.get('dgn_libraries') or [])}",
-        f"Level filters        : {_count(seed, 'levels', 'level_filters')}",
+        f"Levels (DGN libs)    : {sum(len(lv) for _, lv in library_level_sets(r))}",
         f"Text styles          : {_count(seed, 'text_styles', 'count')}",
         f"Dimension styles     : {_count(seed, 'dimension_styles', 'count')}",
         f"Multiline styles     : {_count(seed, 'multiline_styles', 'count')}",
@@ -2229,7 +2179,6 @@ def build_summary(r: dict) -> str:
         f"Line styles (file)   : {_count(seed, 'line_styles', 'file')}",
         f"Line styles (system) : {_count(seed, 'line_styles', 'system')}",
         f"Item type libraries  : {_count(seed, 'item_types', 'count')}",
-        f"Element templates    : {_count(seed, 'element_templates', 'count')}",
         f"Saved views          : {_count(seed, 'views', 'saved_views')}",
         f"Cell models in seed  : {_count(seed, 'cells')}",
         f"Shared cell defs     : {_count(seed, 'dictionary_inventory', 'shared_cell_definitions')}",
@@ -2341,15 +2290,20 @@ def _run(dgn_file, out_dir: str) -> dict:
     seed["display_styles"] = section("display_styles", collect_display_styles, dgn_file)
     seed["fonts"] = section("fonts", collect_fonts, dgn_file)
     seed["item_types"] = section("item_types", collect_item_types, dgn_file)
-    seed["element_templates"] = section("element_templates", collect_element_templates, dgn_file)
     seed["views"] = section("views", collect_named_views, dgn_file)
     seed["references"] = section("references", collect_references, model_ref, default=[])
     seed["dictionary_inventory"] = section("dictionary", collect_dictionary, dgn_file)
-    seed["active_settings"] = section("active_settings", collect_active_settings)
     if DUMP_ACTIVE_MODEL_USAGE:
         lv = (seed.get("levels") or {}).get("levels") or []
         seed["active_model_usage"] = section("active_model_usage", collect_active_usage, model, lv, dgn_file)
     result["seed_file"] = seed
+    result["attached_libraries"] = section("attached_library_levels", collect_attached_library_levels,
+                                           dgn_file, seed["color_table"], level_scope, default=[])
+    covered = {scope_key(l.get("path"), False) for l in result["attached_libraries"]}
+    if level_scope is None:
+        lib_level_scope = {} if covered else None
+    else:
+        lib_level_scope = {k: v for k, v in level_scope.items() if k not in covered}
 
     # Libraries
     opened = 0
@@ -2365,7 +2319,7 @@ def _run(dgn_file, out_dir: str) -> dict:
                 continue
             log(f"dgnlib {p}")
             result["dgn_libraries"].append(
-                dump_library(p, full=True, level_scope=level_scope, colors=seed["color_table"]))
+                dump_library(p, full=True, level_scope=lib_level_scope, colors=seed["color_table"]))
             opened += 1
     if DUMP_CELL_LIBRARIES:
         cell_vars = [variables.get(k) for k in ("MS_CELLLIST", "MS_CELL", "MS_CELLOUT") if variables.get(k)]
