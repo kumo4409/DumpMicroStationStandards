@@ -114,14 +114,36 @@ SCRIPT_VERSION = "1.0.0"
 # ---------------------------------------------------------------------------
 
 _IMPORT_ERRORS: list[str] = []
+_MODULES: dict = {}
 for _mod in ("MSPyBentley", "MSPyBentleyGeom", "MSPyECObjects",
              "MSPyDgnPlatform", "MSPyDgnView", "MSPyMstnPlatform"):
     try:
         exec(f"from {_mod} import *")
+        _MODULES[_mod] = sys.modules[_mod]
     except Exception as _e:  # pragma: no cover - only outside MicroStation
         _IMPORT_ERRORS.append(f"{_mod}: {_e}")
 
 _G = globals()
+
+
+def api_all(name: str) -> list:
+    """Every distinct definition of `name` across the MicroStation modules.
+
+    Some names exist in more than one module (e.g. DgnFile is defined in
+    both MSPyDgnPlatform and MSPyMstnPlatform, and the star imports above
+    let the last one win), so callers that need a specific variant can try
+    them all. MSPyDgnPlatform is listed first.
+    """
+    out = []
+    for mod_name in ("MSPyDgnPlatform", "MSPyMstnPlatform", "MSPyBentley",
+                     "MSPyDgnView", "MSPyECObjects", "MSPyBentleyGeom"):
+        obj = getattr(_MODULES.get(mod_name), name, None)
+        if obj is not None and all(obj is not o for o in out):
+            out.append(obj)
+    g = _G.get(name)
+    if g is not None and all(g is not o for o in out):
+        out.append(g)
+    return out
 
 
 def api(*names):
@@ -832,43 +854,61 @@ def file_name(dgn_file) -> str | None:
     return s(n)
 
 
+def _create_document(path: str):
+    for DgnDocument in api_all("DgnDocument"):
+        fetch = getattr(getattr(DgnDocument, "FetchMode", None), "eRead", None)
+        attempts = []
+        if fetch is not None:
+            attempts += [(path, None, -101, fetch), (path, "", -101, fetch)]
+        attempts += [(path,)]
+        for a in attempts:
+            try:
+                doc = unwrap(DgnDocument.CreateFromFileName(*a))
+            except Exception:
+                continue
+            if doc is not None and not _looks_like_status(doc):
+                return doc
+        doc = unwrap(call(DgnDocument, "CreateForLocalFile", args=(path,)))
+        if doc is not None and not _looks_like_status(doc):
+            return doc
+    return None
+
+
 def open_dgn_readonly(path: str):
     """Open a DGN/DGNLIB/CEL read-only. Returns DgnFile or raises."""
-    DgnDocument = api("DgnDocument")
-    DgnFile = api("DgnFile")
-    OpenMode = api("DgnFileOpenMode")
-    if DgnDocument is None or DgnFile is None:
-        raise RuntimeError("DgnDocument/DgnFile not available")
-    fetch = getattr(getattr(DgnDocument, "FetchMode", None), "eRead", None)
-    doc = None
-    attempts = []
-    if fetch is not None:
-        attempts += [(path, None, -101, fetch), (path, "", -101, fetch)]
-    attempts += [(path,)]
-    for a in attempts:
-        try:
-            doc = unwrap(DgnDocument.CreateFromFileName(*a))
-        except Exception:
-            doc = None
-        if doc is not None and not _looks_like_status(doc):
-            break
-        doc = None
-    if doc is None:
-        doc = unwrap(call(DgnDocument, "CreateForLocalFile", args=(path,)))
+    doc = _create_document(path)
     if doc is None:
         raise RuntimeError("could not create DgnDocument")
-    mode = getattr(OpenMode, "eReadOnly", None) if OpenMode is not None else None
-    f = DgnFile(doc, mode) if mode is not None else DgnFile(doc)
-    st = f.LoadDgnFile()
-    st0 = st[0] if isinstance(st, tuple) else st
-    if not is_ok(st0):
-        raise RuntimeError(f"LoadDgnFile failed: {st0}")
-    for fill in ("FillDictionaryModel",):
-        try:
-            getattr(f, fill)()
-        except Exception:
-            pass
-    return f
+    errors = []
+    for DgnFile in api_all("DgnFile"):
+        modes = [getattr(m, "eReadOnly", None) for m in api_all("DgnFileOpenMode")]
+        modes = [m for m in modes if m is not None] or [None]
+        for mode in modes:
+            ctor_args = (doc, mode) if mode is not None else (doc,)
+            for how in ("ctor", "Create"):
+                try:
+                    if how == "ctor":
+                        f = DgnFile(*ctor_args)
+                    else:
+                        create = getattr(DgnFile, "Create", None)
+                        if create is None:
+                            continue
+                        f = unwrap(create(*ctor_args))
+                except Exception as e:  # noqa: BLE001
+                    errors.append(f"{getattr(DgnFile, '__module__', '?')}.DgnFile {how}: {e}")
+                    continue
+                if f is None or not hasattr(f, "LoadDgnFile"):
+                    continue
+                st = f.LoadDgnFile()
+                st0 = st[0] if isinstance(st, tuple) else st
+                if not is_ok(st0):
+                    raise RuntimeError(f"LoadDgnFile failed: {st0}")
+                try:
+                    f.FillDictionaryModel()
+                except Exception:
+                    pass
+                return f
+    raise RuntimeError("could not construct DgnFile: " + " | ".join(errors[:6]))
 
 
 def model_index_items(dgn_file):
