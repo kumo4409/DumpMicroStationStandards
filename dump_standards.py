@@ -1377,44 +1377,65 @@ def _ls_entry(e) -> dict:
     return d
 
 
+def _read_line_style_map(candidates) -> tuple[list[dict], str | None, dict]:
+    """Try each (owner, method, args) and return the first map that has
+    entries. An empty map is not accepted: the system map comes back empty
+    until it has been loaded, so the loading variants are listed first."""
+    first_props: dict = {}
+    for owner, fn, args in candidates:
+        if owner is None or getattr(owner, fn, None) is None:
+            continue
+        m = unwrap(call(owner, fn, args=args))
+        if m is None:
+            continue
+        entries = [_ls_entry(e) for e in iterate(m)]
+        if entries:
+            return entries, f"{getattr(owner, '__name__', type(owner).__name__)}.{fn}", {}
+        if not first_props:
+            first_props = introspect(m, 1)
+    return [], None, first_props
+
+
 def collect_line_styles(dgn_file) -> dict:
-    out: dict = {"file": [], "system": [], "resource_files": []}
-    maps = []
+    """Line styles of the seed (active) file and the system/resource map.
+
+    Only called for the seed: the same calls caused access violations on
+    DGN libraries opened by this script.
+    """
     LsMap = api("LsMap")
     LsCache = api("LsCache")
     LsDgnFileMap = api("LsDgnFileMap")
     LsSystemMap = api("LsSystemMap")
     LSM = api("LineStyleManager")
-    for owner, fn, args in ((LsMap, "GetMapPtr", (dgn_file, True)),
-                            (LsMap, "GetMapPtr", (dgn_file,)),
-                            (LsDgnFileMap, "GetMapPtr", (dgn_file, True)),
-                            (LsCache, "GetDgnFileCache", (dgn_file,)),
-                            (LSM, "GetNameMap", (dgn_file,)),
-                            (dgn_file, "GetLineStyleMap", ())):
-        if owner is None:
-            continue
-        m = unwrap(call(owner, fn, args=args))
-        if m is not None:
-            maps.append(("file", m))
-            break
-    for owner, fn, args in ((LsSystemMap, "GetSystemMapR", ()),
-                            (LsSystemMap, "GetSystemMapP", (True,)),
-                            (LsSystemMap, "GetSystemMap", ()),
-                            (LsMap, "GetSystemMapP", (True,)),
-                            (LSM, "GetSystemMap", ())):
-        if owner is None:
-            continue
-        m = unwrap(call(owner, fn, args=args))
-        if m is not None:
-            maps.append(("system", m))
-            break
-    for kind, m in maps:
-        for e in iterate(m):
-            out[kind].append(_ls_entry(e))
-        if not out[kind]:
-            out[kind + "_map_properties"] = introspect(m, 1)
-    if not maps:
-        NOTES.append("Line style maps not exposed by bindings; only names referenced by levels/elements resolved.")
+    out: dict = {}
+    out["file"], out["file_source"], props = _read_line_style_map((
+        (LsMap, "GetMapPtr", (dgn_file, True)),
+        (LsDgnFileMap, "GetMapPtr", (dgn_file, True)),
+        (LsMap, "GetMapPtr", (dgn_file,)),
+        (LsCache, "GetDgnFileCache", (dgn_file,)),
+        (LSM, "GetNameMap", (dgn_file,)),
+        (dgn_file, "GetLineStyleMap", ()),
+    ))
+    if props:
+        out["file_map_properties"] = props
+    # Make sure the line style resources are loaded before asking for the
+    # system map (it is loaded on first use otherwise).
+    for owner, fn in ((LSM, "Initialize"), (LsSystemMap, "Load"), (LsSystemMap, "LoadSystemMap")):
+        if owner is not None and getattr(owner, fn, None) is not None:
+            call(owner, fn)
+    out["system"], out["system_source"], props = _read_line_style_map((
+        (LsSystemMap, "GetSystemMapP", (True,)),
+        (LsMap, "GetSystemMapP", (True,)),
+        (LsSystemMap, "GetSystemMapR", ()),
+        (LsSystemMap, "GetSystemMap", ()),
+        (LSM, "GetSystemMap", ()),
+    ))
+    if props:
+        out["system_map_properties"] = props
+    if not out["system"]:
+        NOTES.append("System line style map came back empty; custom line style names on "
+                     "library levels may be blank. Opening the Line Styles dialog in "
+                     "MicroStation before running loads it.")
     out["resource_files"] = split_paths(cfg_get("MS_SYMBRSRC"))
     out["linestyle_dgnlib_vars"] = {k: cfg_get(k) for k in ("MS_LINESTYLEPATH", "MS_DGNLIBLIST")}
     return out
@@ -1904,6 +1925,13 @@ def level_scope_report(level_scope: dict, result: dict) -> dict:
     for lib in result.get("dgn_libraries") or []:
         names = {(l.get("name") or "").upper() for l in (lib.get("levels") or {}).get("levels") or []}
         found.setdefault(scope_key(lib.get("path"), False), set()).update(names)
+    # the same level name read from more than one file with the same name
+    seen: dict[tuple, list[str]] = {}
+    for lib in result.get("dgn_libraries") or []:
+        key = scope_key(lib.get("path"), False)
+        for l in (lib.get("levels") or {}).get("levels") or []:
+            seen.setdefault((key, (l.get("name") or "").upper()), []).append(lib.get("path"))
+    duplicates = {f"{k[0]}: {k[1]}": v for k, v in seen.items() if len(v) > 1}
     missing = {k: sorted(v - found.get(k, set())) for k, v in level_scope.items()}
     missing = {k: v for k, v in missing.items() if v}
     return {
@@ -1911,6 +1939,7 @@ def level_scope_report(level_scope: dict, result: dict) -> dict:
         "found": sum(len(v & found.get(k, set())) for k, v in level_scope.items()),
         "sources_not_found": sorted(k for k in level_scope if k not in found),
         "missing": missing,
+        "duplicates": duplicates,
     }
 
 
@@ -2162,6 +2191,17 @@ def _count(d, *path):
     return d if isinstance(d, int) else 0
 
 
+def _product_version(r: dict) -> str:
+    ms = (r.get("environment") or {}).get("microstation") or {}
+    if ms.get("_USTN_PRODUCT_VERSION"):
+        return ms["_USTN_PRODUCT_VERSION"]
+    variables = (r.get("configuration") or {}).get("variables") or {}
+    for k in sorted(variables):
+        if "VERSION" in k.upper() and variables[k] and re.match(r"^\d+(\.\d+)+", str(variables[k])):
+            return f"{variables[k]} ({k})"
+    return "(version variable not found)"
+
+
 def build_summary(r: dict) -> str:
     seed = r.get("seed_file", {})
     lines = [
@@ -2170,13 +2210,15 @@ def build_summary(r: dict) -> str:
         f"Seed file : {r.get('environment', {}).get('active_file')}",
         f"Created   : {r.get('environment', {}).get('timestamp')}",
         f"Product   : {(r.get('environment', {}).get('microstation') or {}).get('_USTN_PRODUCT_NAME')} "
-        f"{(r.get('environment', {}).get('microstation') or {}).get('_USTN_PRODUCT_VERSION')}",
+        f"{_product_version(r)}",
         f"Workspace : {(r.get('environment', {}).get('microstation') or {}).get('_USTN_WORKSPACENAME')} / "
         f"WorkSet: {(r.get('environment', {}).get('microstation') or {}).get('_USTN_WORKSETNAME')}",
         "",
         f"Models               : {_count(seed, 'models')}",
         f"Level scope          : {(r.get('level_scope') or {}).get('found', '-')} of "
         f"{(r.get('level_scope') or {}).get('expected', '-')} listed levels found",
+        f"Duplicate levels     : {len((r.get('level_scope') or {}).get('duplicates') or {})} "
+        f"(same level in two copies of a library; see level_scope.duplicates)",
         f"Levels (seed)        : {_count(seed, 'levels', 'count')}",
         f"Levels (DGN libs)    : {sum(_count(l, 'levels', 'count') for l in r.get('dgn_libraries') or [])}",
         f"Level filters        : {_count(seed, 'levels', 'level_filters')}",
