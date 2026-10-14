@@ -33,7 +33,7 @@ Settings are at the top of the script:
 | File | Contents |
 |---|---|
 | `standards.json` | Everything. This is the primary output. |
-| `levels.csv` | Seed-file levels, one row per level, with symbology and flags. |
+| `levels.csv` | Levels from the seed file and every DGN library, one row per level, with symbology and flags. The `source` column says which file each level came from. |
 | `config_variables.csv` | Each configuration variable name with its expanded value. |
 | `paths.csv` | Each path referenced by a variable, with whether it exists, whether it is a directory, and how many files a wildcard matches. |
 | `cells.csv` | Cells from the seed (cell models and shared cells) and from every library. |

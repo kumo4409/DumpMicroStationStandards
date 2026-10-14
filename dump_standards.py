@@ -22,7 +22,7 @@ Output
 ------
 A folder (see OUTPUT_DIR below) containing:
   standards.json          - everything, machine readable (primary output)
-  levels.csv              - active file levels, one row per level
+  levels.csv              - seed + DGN library levels, one row per level
   config_variables.csv    - name / expanded value
   paths.csv               - every path referenced by a config variable
   cells.csv               - every cell found (file + libraries)
@@ -1863,10 +1863,15 @@ def write_outputs(result: dict, out_dir: str) -> list[str]:
     written.append(jp)
 
     seed = result.get("seed_file", {})
-    levels = (seed.get("levels") or {}).get("levels") or []
+    # Seed levels plus every DGN library's levels: in a WorkSpace most
+    # standard levels live in the dgnlibs, not in the seed itself.
+    levels = [{"source": "seed", **l} for l in (seed.get("levels") or {}).get("levels") or []]
+    for lib in result.get("dgn_libraries") or []:
+        for l in (lib.get("levels") or {}).get("levels") or []:
+            levels.append({"source": lib.get("path"), **l})
     if levels:
         p = os.path.join(out_dir, "levels.csv")
-        write_csv(p, levels, ["name", "id", "code", "description", "parent_name", "color", "color_rgb",
+        write_csv(p, levels, ["source", "name", "id", "code", "description", "parent_name", "color", "color_rgb",
                               "line_style", "line_style_name", "weight", "display", "frozen", "locked",
                               "plot", "transparency", "display_priority", "element_access",
                               "is_library_level", "library_name"])
@@ -1927,7 +1932,8 @@ def build_summary(r: dict) -> str:
         f"WorkSet: {(r.get('environment', {}).get('microstation') or {}).get('_USTN_WORKSETNAME')}",
         "",
         f"Models               : {_count(seed, 'models')}",
-        f"Levels               : {_count(seed, 'levels', 'count')}",
+        f"Levels (seed)        : {_count(seed, 'levels', 'count')}",
+        f"Levels (DGN libs)    : {sum(_count(l, 'levels', 'count') for l in r.get('dgn_libraries') or [])}",
         f"Level filters        : {_count(seed, 'levels', 'level_filters')}",
         f"Text styles          : {_count(seed, 'text_styles', 'count')}",
         f"Dimension styles     : {_count(seed, 'dimension_styles', 'count')}",
@@ -1945,6 +1951,7 @@ def build_summary(r: dict) -> str:
         f"Paths referenced     : {_count(r, 'paths')}",
         f"Cell libraries       : {_count(r, 'cell_libraries')}",
         f"DGN libraries        : {_count(r, 'dgn_libraries')}",
+        f"DGNLIB list vars     : {', '.join(sorted((r.get('path_groups') or {}).get('dgnlib_lists') or {})) or 'none found'}",
         "",
     ]
     if r.get("_notes"):
