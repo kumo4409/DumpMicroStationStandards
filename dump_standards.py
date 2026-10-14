@@ -97,6 +97,121 @@ USE_NATIVE_VARIABLE_ITERATION = False
 # Sections to skip, e.g. {"active_model_usage", "dictionary"}. If a run
 # crashes, crash.log / progress.log name the section; add it here.
 SKIP_SECTIONS: set[str] = set()
+# Only these levels are exported. Keys are the file the levels come from
+# ("seed" = the active file, otherwise a DGN library file name) and values
+# are level names (case-insensitive). Generated from levels_scope.csv; a
+# levels_scope.csv next to this script, or the file named by
+# LEVEL_SCOPE_CSV, replaces this list (columns: source, name). Set
+# LIMIT_TO_LEVEL_SCOPE = False to export every level again.
+LIMIT_TO_LEVEL_SCOPE = True
+LEVEL_SCOPE_CSV: str | None = None
+LEVEL_SCOPE: dict[str, list[str]] = {
+    'seed': [
+        'Default', 'G-DIMENSIONS',
+    ],
+    'MWD_Border_Levels.dgnlib': [
+        'Default',
+    ],
+    'MWD_Civil_Survey_Levels.dgnlib': [
+        'Default', 'V-PROP-CALTRANS_ROW', 'V-PROP-CONST_LIMITS', 'V-PROP-DIMENSION',
+        'V-PROP-LAYDOWN_EASEMENT', 'V-PROP-MISC', 'V-PROP-MWD_FEE', 'V-PROP-MWD_FEE_ID',
+        'V-PROP-MWD_LEASE', 'V-PROP-MWD_LEASE_ID', 'V-PROP-MWD_PEASMT',
+        'V-PROP-MWD_PEASMT_ID', 'V-PROP-MWD_PERMIT', 'V-PROP-MWD_PERMIT_ID',
+        'V-PROP-MWD_TEASMT', 'V-PROP-MWD_TEASMT_ID', 'V-PROP-OTHER_EASMT',
+        'V-PROP-OTHER_EASMT_ID', 'V-PROP-OTHER_PARCEL', 'V-PROP-OTHER_PARCEL_ID',
+        'V-PROP-STREET_CL', 'V-PROP-STREET_ID', 'V-PROP-STREET_RW',
+        'V-RWPD-ENCUMBRANCE_ACTIVE_(26)', 'V-RWPD-ENCUMBRANCE_INACTIVE_(27)',
+        'V-RWPD-FEE_ACTIVE_(15)', 'V-RWPD-FEE_CONVEYED_(25)',
+        'V-RWPD-MISCELLANEOUS_(63)', 'V-RWPD-OGM_ACTIVE_(20)',
+        'V-RWPD-OGM_INACTIVE_(21)', 'V-RWPD-PENDING_ACTIVE_(23)',
+        'V-RWPD-PENDING_INACTIVE_(24)', 'V-RWPD-PERMANENT_EASTMENTS_ACQUIRED_(16)',
+        'V-RWPD-PERMITS_(19)', 'V-RWPD-POLICY_(32)', 'V-RWPD-PTR_(30)',
+        'V-RWPD-TEMPORARY_EASEMENTS_(17)', 'V-SURV-BENCHMARK', 'V-SURV-BENCHMARK_ID',
+        'V-SURV-DIMENSION', 'V-SURV-LINE', 'V-SURV-LINE_ID', 'V-SURV-MISC',
+        'V-SURV-MONUMENT', 'V-SURV-MONUMENT_ID', 'V-SURV-PT_CODES',
+        'V-SURV-PT_ELEVATIONS', 'V-SURV-PT_ERRORS', 'V-SURV-PT_ID', 'V-SURV-PT_NOTES',
+        'V-SURV-PT_TICK', 'V-TOPO-AC_BERM', 'V-TOPO-AC_BERM_ID', 'V-TOPO-AC_SPOT',
+        'V-TOPO-AC_SPOT_ID', 'V-TOPO-AQUEDUCT', 'V-TOPO-AQUEDUCT_ID', 'V-TOPO-BLDG',
+        'V-TOPO-BLDG_COLUMN', 'V-TOPO-BLDG_COLUMN_ID', 'V-TOPO-BLDG_ID',
+        'V-TOPO-BLDG_PATTERN', 'V-TOPO-BOREHOLE', 'V-TOPO-BOREHOLE_ID', 'V-TOPO-BRIDGE',
+        'V-TOPO-BRIDGE_ID', 'V-TOPO-CAB', 'V-TOPO-CAB_ID', 'V-TOPO-CATCH_BASIN',
+        'V-TOPO-CATCH_BASIN_ID', 'V-TOPO-CHANNEL', 'V-TOPO-CHANNEL_CENTER',
+        'V-TOPO-CHANNEL_ID', 'V-TOPO-CHEM_TRENCH', 'V-TOPO-CHEM_TRENCH_CENTER',
+        'V-TOPO-CHEM_TRENCH_HIDDEN', 'V-TOPO-CHEM_TRENCH_ID', 'V-TOPO-CONC_BRKLINE',
+        'V-TOPO-CONC_BRKLINE_ID', 'V-TOPO-CONC_SPOT', 'V-TOPO-CONC_SPOT_ID',
+        'V-TOPO-CONTOUR-MAJOR', 'V-TOPO-CONTOUR-MAJOR_ID', 'V-TOPO-CONTOUR-MINOR',
+        'V-TOPO-CONTOUR-MINOR_ID', 'V-TOPO-CURB_BK', 'V-TOPO-CURB_FL', 'V-TOPO-CURB_ID',
+        'V-TOPO-CURB_TOP_FACE', 'V-TOPO-DRAIN', 'V-TOPO-DRAIN_ID', 'V-TOPO-DRIVEWAY',
+        'V-TOPO-DRIVEWAY_ID', 'V-TOPO-EAVE', 'V-TOPO-ETS', 'V-TOPO-ETS_ID',
+        'V-TOPO-EYEWASH', 'V-TOPO-EYEWASH_ID', 'V-TOPO-FENCE', 'V-TOPO-FENCE_ID',
+        'V-TOPO-FLAG', 'V-TOPO-FLAG_ID', 'V-TOPO-FLOOD_LINE', 'V-TOPO-FLOW_LINE',
+        'V-TOPO-GUIDE_MARKER', 'V-TOPO-GUTTER', 'V-TOPO-GUTTER_CENTER',
+        'V-TOPO-GUTTER_ID', 'V-TOPO-HOSEBIB', 'V-TOPO-HOSEBIB_ID', 'V-TOPO-HYDRANT',
+        'V-TOPO-HYDRANT_ID', 'V-TOPO-LANDSCAPE', 'V-TOPO-LANDSCAPE_ID',
+        'V-TOPO-LIMITS_OF_GRADING', 'V-TOPO-MAILBOX', 'V-TOPO-MAILBOX_ID',
+        'V-TOPO-MISC', 'V-TOPO-MWD_MH', 'V-TOPO-MWD_MH_ID', 'V-TOPO-MWD_PIPELINE',
+        'V-TOPO-MWD_PIPELINE_ID', 'V-TOPO-NATURAL_DITCH', 'V-TOPO-NATURAL_DITCH_ID',
+        'V-TOPO-NATURAL_GROUND_SPOT', 'V-TOPO-PARKING_METER', 'V-TOPO-PATH',
+        'V-TOPO-PATH_ID', 'V-TOPO-PATTERN', 'V-TOPO-PIEZOMETER', 'V-TOPO-PIEZOMETER_ID',
+        'V-TOPO-PIPELINE', 'V-TOPO-PIPELINE_CENTER', 'V-TOPO-PIPELINE_ID',
+        'V-TOPO-POST', 'V-TOPO-POST_ID', 'V-TOPO-POTHOLE', 'V-TOPO-POTHOLE_ID',
+        'V-TOPO-PVMNT_EDGE', 'V-TOPO-PVMNT_MARKING', 'V-TOPO-PVMNT_MARKING_ID',
+        'V-TOPO-PVMNT_SAWCUT', 'V-TOPO-RAILING', 'V-TOPO-RAILING_ID', 'V-TOPO-RAILROAD',
+        'V-TOPO-RAILROAD_CENTER', 'V-TOPO-RAILROAD_ID', 'V-TOPO-RIDGE',
+        'V-TOPO-RIDGE_ID', 'V-TOPO-ROAD-DIRT', 'V-TOPO-ROAD-DIRT_CENTER',
+        'V-TOPO-ROAD-DIRT_ID', 'V-TOPO-ROAD-PAVED', 'V-TOPO-ROAD-PAVED_CENTER',
+        'V-TOPO-ROAD-PAVED_ID', 'V-TOPO-ROAD-PAVED_PATTERNS', 'V-TOPO-ROAD-SHOULDER',
+        'V-TOPO-ROCK', 'V-TOPO-ROCK_ID', 'V-TOPO-SHED', 'V-TOPO-SHED_ID',
+        'V-TOPO-SIDEWALK', 'V-TOPO-SIDEWALK_ID', 'V-TOPO-SIGN_OTHER',
+        'V-TOPO-SIGN_OTHER_ID', 'V-TOPO-SLAB', 'V-TOPO-SLAB_ID', 'V-TOPO-SLOPE_BREAK',
+        'V-TOPO-SLOPE_TOE', 'V-TOPO-SLOPE_TOE_ID', 'V-TOPO-SLOPE_TOP',
+        'V-TOPO-SLOPE_TOP_ID', 'V-TOPO-SPOT_ELEV', 'V-TOPO-SPOT_ELEV_TICK',
+        'V-TOPO-STAIRS', 'V-TOPO-STAIRS_ID', 'V-TOPO-STREET_LIGHT',
+        'V-TOPO-STREET_LIGHT_ID', 'V-TOPO-STREET_SIGN', 'V-TOPO-STREET_SIGN_ID',
+        'V-TOPO-STRESS_CRACK', 'V-TOPO-STRESS_CRK_ID', 'V-TOPO-STRUCTURE',
+        'V-TOPO-STRUCTURE_ID', 'V-TOPO-TANK_OTHER', 'V-TOPO-TANK_OTHER_ID',
+        'V-TOPO-TOWER', 'V-TOPO-TOWER_ID', 'V-TOPO-TRAFFIC_SIGNAL',
+        'V-TOPO-TRAFFIC_SIGNAL_ID', 'V-TOPO-TRENCH_OTHER', 'V-TOPO-UNDEFINED',
+        'V-TOPO-UNDEFINED_ID', 'V-TOPO-VEGETATION', 'V-TOPO-VEGETATION_ID',
+        'V-TOPO-VENT', 'V-TOPO-VENT_ID', 'V-TOPO-V_DITCH', 'V-TOPO-V_DITCH_CENTER',
+        'V-TOPO-V_DITCH_ID', 'V-TOPO-WALL', 'V-TOPO-WALL_ID', 'V-TOPO-WATER',
+        'V-TOPO-WATER_ID', 'V-TOPO-WATER_POND', 'V-TOPO-WATER_POND_ID',
+        'V-TOPO-WATER_RESERVOIR', 'V-TOPO-WATER_RESERVOIR_ID', 'V-TOPO-WATER_STREAM',
+        'V-TOPO-WATER_STREAM_ID', 'V-TOPO-WATER_SWAMPS', 'V-TOPO-WATER_SWAMPS_ID',
+        'V-TOPO-WATER_TANK', 'V-TOPO-WATER_TANK_ID', 'V-TOPO-WELL', 'V-TOPO-WELL_ID',
+        'V-UTIL-ABANDONED', 'V-UTIL-ABANDONED_ID', 'V-UTIL-CABLE', 'V-UTIL-CABLE_ID',
+        'V-UTIL-ELECTRIC', 'V-UTIL-ELECTRIC_ID', 'V-UTIL-MISC', 'V-UTIL-NATURAL_GAS',
+        'V-UTIL-NATURAL_GAS_ID', 'V-UTIL-OVERHEAD', 'V-UTIL-OVERHEAD_ID',
+        'V-UTIL-SEWER', 'V-UTIL-SEWER_ID', 'V-UTIL-SLUDGE', 'V-UTIL-SLUDGE_ID',
+        'V-UTIL-STORM', 'V-UTIL-STORM_ID', 'V-UTIL-SUE-AIR', 'V-UTIL-SUE-AIR_ID',
+        'V-UTIL-SUE-CHEMICAL', 'V-UTIL-SUE-CHEMICAL_ID', 'V-UTIL-SUE-COMMUNICATIONS',
+        'V-UTIL-SUE-COMMUNICATIONS_ID', 'V-UTIL-SUE-ELECTRIC', 'V-UTIL-SUE-ELECTRIC_ID',
+        'V-UTIL-SUE-GAS', 'V-UTIL-SUE-GAS_ID', 'V-UTIL-SUE-OIL', 'V-UTIL-SUE-OIL_ID',
+        'V-UTIL-SUE-RECLAIMED_WATER', 'V-UTIL-SUE-RECLAIMED_WATER_ID',
+        'V-UTIL-SUE-SEWER', 'V-UTIL-SUE-SEWER_ID', 'V-UTIL-SUE-STEAM',
+        'V-UTIL-SUE-STEAM_ID', 'V-UTIL-SUE-STORM_DRAIN', 'V-UTIL-SUE-STORM_DRAIN_ID',
+        'V-UTIL-SUE-UNKNOWN', 'V-UTIL-SUE-UNKNOWN_ID', 'V-UTIL-SUE-WATER',
+        'V-UTIL-SUE-WATER_ID', 'V-UTIL-TELEPHONE', 'V-UTIL-TELEPHONE_ID',
+        'V-UTIL-UNKNOWN', 'V-UTIL-UNKNOWN_ID', 'V-UTIL-USA-AIR', 'V-UTIL-USA-AIR_ID',
+        'V-UTIL-USA-CHEMICAL', 'V-UTIL-USA-CHEMICAL_ID', 'V-UTIL-USA-COMMUNICATIONS',
+        'V-UTIL-USA-COMMUNICATIONS_ID', 'V-UTIL-USA-ELECTRIC', 'V-UTIL-USA-ELECTRIC_ID',
+        'V-UTIL-USA-GAS', 'V-UTIL-USA-GAS_ID', 'V-UTIL-USA-OIL', 'V-UTIL-USA-OIL_ID',
+        'V-UTIL-USA-RECLAIMED_WATER', 'V-UTIL-USA-RECLAIMED_WATER_ID',
+        'V-UTIL-USA-SEWER', 'V-UTIL-USA-SEWER_ID', 'V-UTIL-USA-STEAM',
+        'V-UTIL-USA-STEAM_ID', 'V-UTIL-USA-STORM_DRAIN', 'V-UTIL-USA-STORM_DRAIN_ID',
+        'V-UTIL-USA-UNKNOWN', 'V-UTIL-USA-UNKNOWN_ID', 'V-UTIL-USA-WATER',
+        'V-UTIL-USA-WATER_ID', 'V-UTIL-USA_ID', 'V-UTIL-USA_MARKINGS',
+        'V-UTIL-VAULT_ABOVE', 'V-UTIL-VAULT_ABOVE_ID', 'V-UTIL-VAULT_BELOW',
+        'V-UTIL-VAULT_BELOW_ID', 'V-UTIL-WATER', 'V-UTIL-WATER_ID',
+    ],
+    'MWD_Interface.dgnlib': [
+        'B-GRAPHICS-1', 'B-PLOT-SHAPE', 'B-TEXT', 'Default', 'G-ANNOTATION',
+        'G-ANNOTATION-TITLE', 'G-CONSTRUCT', 'G-CROSSREFERENCE', 'G-DIMENSIONS',
+        'G-ELEMENT-MASKING', 'G-MONUMENT', 'G-NORTH', 'G-PATTERN-RASTER',
+        'G-REVISION-SYMBOL', 'G-STAMP', 'G-TITLE', 'G-UNIDENTIFIED', 'I-INSTRUMENT',
+    ],
+}
+
 # Read text/dimension style properties (height, font, arrow size, ...) by
 # trying each property id with the style's typed getters.
 PROBE_STYLE_PROPERTIES = True
@@ -1218,24 +1333,34 @@ def color_table(dgn_file) -> list[dict]:
 
 # --- line styles -----------------------------------------------------------
 
-def line_style_name(num, dgn_file, cache: dict) -> str | None:
+# number -> name, filled from the seed's line style tables. Library files
+# are never asked directly: LineStyleManager.GetNameFromNumber and the line
+# style map getters caused access violations on DGN libraries opened by
+# this script.
+LINE_STYLE_NAMES: dict[int, str] = {}
+
+
+def register_line_style_names(line_styles: dict) -> None:
+    for kind in ("system", "file"):  # file entries win over system ones
+        for e in (line_styles or {}).get(kind) or []:
+            try:
+                num = int(e.get("number"))
+            except Exception:
+                continue
+            if e.get("name"):
+                LINE_STYLE_NAMES[num] = e["name"]
+
+
+def line_style_name(num, dgn_file=None, cache: dict | None = None) -> str | None:
     if num is None:
         return None
     try:
         num = int(num)
     except Exception:
         return s(num)
-    if num in cache:
-        return cache[num]
     if 0 <= num <= 7:
-        cache[num] = str(num)
-        return cache[num]
-    name = None
-    LSM = api("LineStyleManager")
-    if LSM is not None:
-        name = call_out(LSM, "GetNameFromNumber", num, dgn_file)
-    cache[num] = name
-    return name
+        return str(num)
+    return LINE_STYLE_NAMES.get(num)
 
 
 def _ls_entry(e) -> dict:
@@ -1359,15 +1484,65 @@ def level_record(lh, dgn_file, colors: list[dict], ls_cache: dict) -> dict:
     return rec
 
 
-def collect_levels(dgn_file, colors=None) -> dict:
+def _script_dir() -> str | None:
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        return None
+
+
+def load_level_scope() -> dict[str, set[str]] | None:
+    """{source key: {LEVEL NAME}} or None when not limiting levels.
+
+    Source key is "seed" or a lower-case DGN library file name.
+    """
+    if not LIMIT_TO_LEVEL_SCOPE:
+        return None
+    raw: dict[str, list[str]] = LEVEL_SCOPE
+    origin = "embedded LEVEL_SCOPE"
+    candidates = [LEVEL_SCOPE_CSV] if LEVEL_SCOPE_CSV else []
+    if _script_dir():
+        candidates.append(os.path.join(_script_dir(), "levels_scope.csv"))
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        try:
+            loaded: dict[str, list[str]] = {}
+            with open(path, newline="", encoding="utf-8-sig") as fh:
+                for row in csv.DictReader(fh):
+                    name = (row.get("name") or "").strip()
+                    src = (row.get("source") or "seed").strip()
+                    if name:
+                        key = "seed" if src.lower() == "seed" else src.replace("/", "\\").split("\\")[-1]
+                        loaded.setdefault(key, []).append(name)
+            if loaded:
+                raw, origin = loaded, path
+                break
+        except Exception as e:  # noqa: BLE001
+            record_error(f"read level scope {path}", e)
+    NOTES.append(f"Levels limited to {sum(len(v) for v in raw.values())} names from {origin}")
+    return {k.lower(): {n.upper() for n in v} for k, v in raw.items()}
+
+
+def scope_key(path: str | None, is_seed: bool) -> str:
+    return "seed" if is_seed else os.path.basename(path or "").lower()
+
+
+def collect_levels(dgn_file, colors=None, wanted: set[str] | None = None) -> dict:
+    """Levels of one file. `wanted` = upper-case names to keep (None = all)."""
     cache = call(dgn_file, "GetLevelCache")
     if cache is None:
         raise RuntimeError("GetLevelCache not available")
     colors = colors if colors is not None else []
     ls_cache: dict = {}
     levels = []
+    skipped = 0
     for lh in iterate(cache):
-        crumb(f"  level {s(call(lh, 'GetName'))}")
+        lname = s(call(lh, "GetName"))
+        if wanted is not None and (lname or "").upper() not in wanted:
+            skipped += 1
+            continue
+        crumb(f"  level {lname}")
         try:
             levels.append(level_record(lh, dgn_file, colors, ls_cache))
         except Exception as e:  # noqa: BLE001
@@ -1393,6 +1568,7 @@ def collect_levels(dgn_file, colors=None) -> dict:
             pass
     return {
         "count": len(levels),
+        "skipped_out_of_scope": skipped,
         "cache_properties": introspect(cache, 0),
         "levels": sorted(levels, key=lambda l: (l.get("name") or "").upper()),
         "level_filters": filters,
@@ -1721,6 +1897,23 @@ def collect_dictionary(dgn_file) -> dict:
     return {"element_counts": counts, "descriptions": names, "shared_cell_definitions": shared_cells}
 
 
+def level_scope_report(level_scope: dict, result: dict) -> dict:
+    """Which in-scope levels were found, and which were not."""
+    found: dict[str, set[str]] = {"seed": {(l.get("name") or "").upper() for l in
+                                           ((result.get("seed_file") or {}).get("levels") or {}).get("levels") or []}}
+    for lib in result.get("dgn_libraries") or []:
+        names = {(l.get("name") or "").upper() for l in (lib.get("levels") or {}).get("levels") or []}
+        found.setdefault(scope_key(lib.get("path"), False), set()).update(names)
+    missing = {k: sorted(v - found.get(k, set())) for k, v in level_scope.items()}
+    missing = {k: v for k, v in missing.items() if v}
+    return {
+        "expected": sum(len(v) for v in level_scope.values()),
+        "found": sum(len(v & found.get(k, set())) for k, v in level_scope.items()),
+        "sources_not_found": sorted(k for k in level_scope if k not in found),
+        "missing": missing,
+    }
+
+
 def collect_active_usage(model, levels: list[dict], dgn_file) -> dict:
     by_id = {l.get("id"): l.get("name") for l in levels}
     EPG = api("ElementPropertiesGetter")
@@ -1808,19 +2001,28 @@ def cell_rows(models: list[dict], all_models_are_cells: bool = False) -> list[di
             if m.get("is_cell") or (all_models_are_cells and not m.get("is_hidden"))]
 
 
-def collect_file_standards(dgn_file, full: bool, is_cell_library: bool = False) -> dict:
-    """The per-file standards set, used for the seed and every library."""
+def collect_file_standards(dgn_file, full: bool, is_cell_library: bool = False,
+                           level_scope: dict | None = None, path: str | None = None,
+                           colors: list | None = None) -> dict:
+    """The per-file standards set for a library file.
+
+    Line styles are not read here: the line style calls caused access
+    violations on library files. Names come from the seed's tables.
+    """
     d: dict = {}
     d["models"] = section("models", collect_models, dgn_file, False, default=[])
     d["cells"] = cell_rows(d["models"], is_cell_library)
     if not full:
         return d
-    d["levels"] = section("levels", collect_levels, dgn_file, None)
+    if level_scope is None:
+        d["levels"] = section("levels", collect_levels, dgn_file, colors)
+    elif scope_key(path, False) in level_scope:
+        d["levels"] = section("levels", collect_levels, dgn_file, colors,
+                              level_scope[scope_key(path, False)])
     d["text_styles"] = section("text_styles", collect_text_styles, dgn_file)
     d["dimension_styles"] = section("dimension_styles", collect_dimension_styles, dgn_file)
     d["multiline_styles"] = section("multiline_styles", collect_multiline_styles, dgn_file)
     d["display_styles"] = section("display_styles", collect_display_styles, dgn_file)
-    d["line_styles"] = section("line_styles", collect_line_styles, dgn_file)
     d["item_types"] = section("item_types", collect_item_types, dgn_file)
     d["element_templates"] = section("element_templates", collect_element_templates, dgn_file)
     d["views"] = section("views", collect_named_views, dgn_file)
@@ -1828,7 +2030,8 @@ def collect_file_standards(dgn_file, full: bool, is_cell_library: bool = False) 
     return d
 
 
-def dump_library(path: str, full: bool, is_cell_library: bool = False) -> dict:
+def dump_library(path: str, full: bool, is_cell_library: bool = False,
+                 level_scope: dict | None = None, colors: list | None = None) -> dict:
     rec: dict = {"path": path}
     try:
         st = os.stat(path)
@@ -1844,7 +2047,7 @@ def dump_library(path: str, full: bool, is_cell_library: bool = False) -> dict:
         rec["_error"] = str(e)
         return rec
     try:
-        rec.update(collect_file_standards(f, full, is_cell_library))
+        rec.update(collect_file_standards(f, full, is_cell_library, level_scope, path, colors))
     finally:
         del f
     return rec
@@ -1972,6 +2175,8 @@ def build_summary(r: dict) -> str:
         f"WorkSet: {(r.get('environment', {}).get('microstation') or {}).get('_USTN_WORKSETNAME')}",
         "",
         f"Models               : {_count(seed, 'models')}",
+        f"Level scope          : {(r.get('level_scope') or {}).get('found', '-')} of "
+        f"{(r.get('level_scope') or {}).get('expected', '-')} listed levels found",
         f"Levels (seed)        : {_count(seed, 'levels', 'count')}",
         f"Levels (DGN libs)    : {sum(_count(l, 'levels', 'count') for l in r.get('dgn_libraries') or [])}",
         f"Level filters        : {_count(seed, 'levels', 'level_filters')}",
@@ -1994,6 +2199,15 @@ def build_summary(r: dict) -> str:
         f"DGNLIB list vars     : {', '.join(sorted((r.get('path_groups') or {}).get('dgnlib_lists') or {})) or 'none found'}",
         "",
     ]
+    scope = r.get("level_scope") or {}
+    if scope.get("missing") or scope.get("sources_not_found"):
+        lines.append("Listed levels not found:")
+        for src_key in scope.get("sources_not_found") or []:
+            lines.append(f"  - {src_key}: file not found/opened")
+        for src_key, names in (scope.get("missing") or {}).items():
+            if src_key not in (scope.get("sources_not_found") or []):
+                lines.append(f"  - {src_key}: {', '.join(names)}")
+        lines.append("")
     if r.get("_notes"):
         lines.append("Notes:")
         lines += [f"  - {n}" for n in r["_notes"]]
@@ -2074,8 +2288,11 @@ def _run(dgn_file, out_dir: str) -> dict:
     seed["color_table"] = section("color_table", color_table, dgn_file, default=[])
     seed["models"] = section("models", collect_models, dgn_file, True, default=[])
     seed["cells"] = cell_rows(seed["models"])
-    seed["levels"] = section("levels", collect_levels, dgn_file, seed["color_table"])
     seed["line_styles"] = section("line_styles", collect_line_styles, dgn_file)
+    register_line_style_names(seed["line_styles"])
+    level_scope = load_level_scope()
+    seed["levels"] = section("levels", collect_levels, dgn_file, seed["color_table"],
+                             None if level_scope is None else level_scope.get("seed", set()))
     seed["text_styles"] = section("text_styles", collect_text_styles, dgn_file)
     seed["dimension_styles"] = section("dimension_styles", collect_dimension_styles, dgn_file)
     seed["multiline_styles"] = section("multiline_styles", collect_multiline_styles, dgn_file)
@@ -2105,7 +2322,8 @@ def _run(dgn_file, out_dir: str) -> dict:
             if os.path.normcase(os.path.abspath(p)) == seed_key:
                 continue
             log(f"dgnlib {p}")
-            result["dgn_libraries"].append(dump_library(p, full=True))
+            result["dgn_libraries"].append(
+                dump_library(p, full=True, level_scope=level_scope, colors=seed["color_table"]))
             opened += 1
     if DUMP_CELL_LIBRARIES:
         cell_vars = [variables.get(k) for k in ("MS_CELLLIST", "MS_CELL", "MS_CELLOUT") if variables.get(k)]
@@ -2124,6 +2342,8 @@ def _run(dgn_file, out_dir: str) -> dict:
                 dump_library(p, full=False, is_cell_library=p.lower().endswith(".cel")))
             opened += 1
 
+    if level_scope is not None:
+        result["level_scope"] = level_scope_report(level_scope, result)
     result["_notes"] = list(dict.fromkeys(NOTES))
     result["_errors"] = ERRORS
     result["_elapsed_seconds"] = round(time.time() - _T0, 1)
